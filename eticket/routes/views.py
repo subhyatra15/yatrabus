@@ -1,6 +1,8 @@
 from rest_framework import viewsets, permissions,views ,status
 from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.decorators import action
 
 from .models import Route, RouteStop, RouteFare
 from .serializers import RouteSerializer, RouteStopSerializer
@@ -101,6 +103,115 @@ class RouteViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
+
+# BusRouteViewSet
+class BusRouteViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = RouteSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        print("+++++++++++++++++++++++",user)
+        return Route.objects.filter(status='ACTIVE',operator=user)
+
+    @action(detail=False, methods=['get'], url_path='routestop')
+    def get_route_stops(self, request):
+        route_id = request.query_params.get('routeid')
+        
+        if not route_id:
+            return Response(
+                {'error': 'routeid parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            route = Route.objects.get(id=route_id,operator=user)
+            stops = RouteStop.objects.filter(route=route).order_by('stop_order')
+            
+            stops_data = []
+            for stop in stops:
+                stops_data.append({
+                    'id': stop.id,
+                    'city': stop.city.id,
+                    'city_name': stop.city.name,
+                    'stop_order': stop.stop_order,
+                    'arrival_offset': str(stop.arrival_offset),
+                    'departure_offset': str(stop.departure_offset),
+                    'is_boarding': stop.is_boarding,
+                    'is_dropping': stop.is_dropping,
+                })
+            
+            return Response({
+                'data': stops_data,
+                'route': {
+                    'id': route.id,
+                    'source': route.source_city.name,
+                    'destination': route.destination_city.name,
+                }
+            })
+        except Route.DoesNotExist:
+            return Response(
+                {'error': 'Route not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+    @action(detail=False, methods=['get'], url_path='priceperseat')
+    def get_price_per_seat(self, request):
+        """
+        Get price per seat between two stops
+        Query params: route, boardingstop, droppingstop
+        """
+        route_id = request.query_params.get('route')
+        boarding_stop_id = request.query_params.get('boardingstop')
+        dropping_stop_id = request.query_params.get('droppingstop')
+        
+        if not all([route_id, boarding_stop_id, dropping_stop_id]):
+            return Response(
+                {'error': 'route, boardingstop, and droppingstop parameters are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            route = Route.objects.get(id=route_id)
+            boarding_stop = RouteStop.objects.get(id=boarding_stop_id, route=route)
+            dropping_stop = RouteStop.objects.get(id=dropping_stop_id, route=route)
+            
+            if boarding_stop.stop_order >= dropping_stop.stop_order:
+                return Response(
+                    {'error': 'Boarding stop must be before dropping stop'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            fare_obj = RouteFare.objects.filter(
+                route=route,
+                from_stop=boarding_stop,
+                to_stop=dropping_stop
+            ).first()
+            
+            if fare_obj:
+                return Response({
+                    'priceperseat': fare_obj.fare,
+                    'currency': 'NPR',
+                    'from_stop': boarding_stop.city.name,
+                    'to_stop': dropping_stop.city.name,
+                })
+            else:
+                return Response(
+                    {'error': 'Fare not found for this route segment'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+                
+        except Route.DoesNotExist:
+            return Response(
+                {'error': 'Route not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except RouteStop.DoesNotExist:
+            return Response(
+                {'error': 'Stop not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
 # Get RouteStop
 class RouteStopView(views.APIView):
     def get(self,request):
@@ -156,7 +267,7 @@ class CalculatePriceView(views.APIView):
             })
         
         priceperseat = RouteFare.objects.filter(route_id=route,from_stop=boardingstop,to_stop=droppingstop).first()
-        print("+++++++++++++++++++++++++priceperseat",priceperseat)
+
         if not priceperseat:
             return Response({
                 'message':'Priceperseat Not Found',

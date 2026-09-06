@@ -158,8 +158,8 @@ SIMPLE_JWT = {
 ESEWA_PAYMENT_URL = os.getenv("ESEWA_PAYMENT_URL", "https://rc-epay.esewa.com.np/api/epay/main/v2/form")
 ESEWA_PRODUCT_CODE = os.getenv("ESEWA_PRODUCT_CODE", "EPAYTEST")
 ESEWA_SECRET_KEY = os.getenv("ESEWA_SECRET_KEY", "8gBm/:&EnhH.1/q")
-ESEWA_SUCCESS_URL = os.getenv("ESEWA_SUCCESS_URL", "http://yourdomain.com/api/payment/esewa/success/")
-ESEWA_FAILURE_URL = os.getenv("ESEWA_FAILURE_URL", "http://yourdomain.com/api/payment/esewa/failure/")
+ESEWA_SUCCESS_URL = os.getenv("ESEWA_SUCCESS_URL", "http://localhost:3000/payment/esewa/success/")
+ESEWA_FAILURE_URL = os.getenv("ESEWA_FAILURE_URL", "http://localhost:3000/payment/esewa/failure/")
 
 # Khalti Details
 KHALTI_INITIATE_URL = os.getenv("KHALTI_INITIATE_URL", "https://dev.khalti.com/api/v2/epayment/initiate/")

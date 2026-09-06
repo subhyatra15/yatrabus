@@ -13,6 +13,7 @@ from schedule.models import Schedule
 from routes.models import RouteStop, RouteFare
 from django.db.models import Prefetch
 from appsettings.models import Settings
+from seat.models import Seat
 
 import json
 import redis
@@ -238,8 +239,8 @@ class BookingViewSet(viewsets.ModelViewSet):
         discounted_fare = total_fare - discount
         
         # Calculate platform fee and tax
-        platform_fee = discounted_fare * platform_cost_percentage
-        tax_amount = discounted_fare * tax_percentage
+        platform_fee = (discounted_fare * platform_cost_percentage) / 100
+        tax_amount = (discounted_fare * tax_percentage) / 100
         
         # Calculate total
         total = discounted_fare + platform_fee + tax_amount

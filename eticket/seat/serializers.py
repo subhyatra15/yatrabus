@@ -21,6 +21,7 @@ class SeatSerializer(serializers.ModelSerializer):
             "row",
             "col",
             "is_window",
+            'extra_price',
             "created_at",
         ]
 

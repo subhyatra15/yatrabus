@@ -2,6 +2,30 @@ from rest_framework import serializers
 from .models import Route, RouteStop, RouteFare
 
 
+
+class RouteStopSerializer(serializers.ModelSerializer):
+    city_name = serializers.CharField(source="city.name", read_only=True)
+    # route = serializers.CharField(source="route", read_only=True
+    
+    class Meta:
+        model = RouteStop
+        fields ="__all__"
+
+class RouteFareSerializer(serializers.ModelSerializer):
+    from_stop_city = serializers.CharField(source="from_stop.city.name", read_only=True)
+    to_stop_city = serializers.CharField(source="to_stop.city.name", read_only=True)
+
+    class Meta:
+        model = RouteFare
+        fields = [
+            "id",
+            "from_stop",
+            "from_stop_city",
+            "to_stop",
+            "to_stop_city",
+            "fare",
+        ]
+
 class RouteSerializer(serializers.ModelSerializer):
     operator_name = serializers.CharField(
         source="operator.fullName",
@@ -24,6 +48,9 @@ class RouteSerializer(serializers.ModelSerializer):
     )
 
     fare = serializers.SerializerMethodField()
+    stops = RouteStopSerializer(many=True, read_only=True)
+    fares = RouteFareSerializer(many=True, read_only=True)
+    
 
     class Meta:
         model = Route
@@ -38,6 +65,8 @@ class RouteSerializer(serializers.ModelSerializer):
             "destination_city",
             "destination_city_name",
             "fare",
+            "fares",
+            "stops",
             "distance",
             "duration",
             "status",
@@ -91,10 +120,4 @@ class RouteSerializer(serializers.ModelSerializer):
 
         return attrs
 
-class RouteStopSerializer(serializers.ModelSerializer):
-    city_name = serializers.CharField(source="city.name", read_only=True)
-    # route = serializers.CharField(source="route", read_only=True
-    
-    class Meta:
-        model = RouteStop
-        fields ="__all__"
+

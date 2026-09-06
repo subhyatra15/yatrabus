@@ -448,97 +448,17 @@ class DriverTripsView(views.APIView):
         now = timezone.now()
         
         return [
-            {
-                'id': 1,
-                'route': 'Kathmandu → Pokhara',
-                'from': 'Kathmandu',
-                'to': 'Pokhara',
-                'departure': (now + timedelta(hours=1)).isoformat(),
-                'arrival': (now + timedelta(hours=6, minutes=30)).isoformat(),
-                'date': now.date().isoformat(),
-                'status': 'upcoming',
-                'vehicle': 'Sajha Bus',
-                'vehicleNumber': 'BA 1 KA 1234',
-                'vehicleType': 'bus',
-                'bookedSeats': 25,
-                'totalSeats': 40,
-                'availableSeats': 15,
-                'passengers': [
-                    {
-                        'id': 1,
-                        'name': 'Rahul Sharma',
-                        'seat': 'A1'
-                    },
-                    {
-                        'id': 2,
-                        'name': 'Sita Giri',
-                        'seat': 'A2'
-                    }
-                ]
-            },
-            {
-                'id': 2,
-                'route': 'Pokhara → Kathmandu',
-                'from': 'Pokhara',
-                'to': 'Kathmandu',
-                'departure': (now + timedelta(hours=3)).isoformat(),
-                'arrival': (now + timedelta(hours=8, minutes=30)).isoformat(),
-                'date': now.date().isoformat(),
-                'status': 'upcoming',
-                'vehicle': 'Sajha Hiace',
-                'vehicleNumber': 'BA 1 KA 5678',
-                'vehicleType': 'hiace',
-                'bookedSeats': 8,
-                'totalSeats': 12,
-                'availableSeats': 4,
-                'passengers': []
-            },
-            {
-                'id': 3,
-                'route': 'Butwal → Kathmandu',
-                'from': 'Butwal',
-                'to': 'Kathmandu',
-                'departure': (now - timedelta(hours=2)).isoformat(),
-                'arrival': (now + timedelta(hours=4, minutes=30)).isoformat(),
-                'date': now.date().isoformat(),
-                'status': 'active',
-                'vehicle': 'Lumbini Express',
-                'vehicleNumber': 'BA 2 KA 5678',
-                'vehicleType': 'bus',
-                'bookedSeats': 32,
-                'totalSeats': 40,
-                'availableSeats': 8,
-                'passengers': [
-                    {
-                        'id': 3,
-                        'name': 'Hari Poudel',
-                        'seat': 'B1'
-                    },
-                    {
-                        'id': 4,
-                        'name': 'Gita Adhikari',
-                        'seat': 'B2'
-                    }
-                ]
-            }
+           
         ]
 
 
 class DriverTripDetailView(views.APIView):
-    """
-    Get detailed information about a specific trip
-    Supports both Bus and Hiace schedules
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request, trip_id):
         user = request.user
-        
-        # Debug logs
-        print(f"=== DriverTripDetailView called ===")
-        print(f"User: {user} (ID: {user.id})")
-        print(f"Trip ID: {trip_id}")
-        print(f"User Role: {user.role}")
+
+        print("++++++++++++++++++++++++++++++++++HIT")
         
         # Check if user is a driver/operator
         if user.role != 'D':
@@ -667,8 +587,9 @@ class DriverTripDetailView(views.APIView):
             booking_status__in=['PAID', 'CONFIRMED']
         )
         total_earnings = bookings.aggregate(total=Sum('total_amount'))['total'] or 0
-        platform_fee = float(total_earnings) * 0.10
-        driver_earnings = float(total_earnings) - platform_fee
+        platform_fee = bookings.aggregate(total=Sum('platform_amount'))['total'] or 0
+        print("+++++++++++++++++++++++++++++++",platform_fee)
+        driver_earnings = float(total_earnings) - float(platform_fee)
 
         # Get status
         now = timezone.now()
@@ -894,11 +815,7 @@ class DriverTripDetailView(views.APIView):
     def get(self, request, trip_id):
         user = request.user
         
-        # Debug logs
-        print(f"=== DriverTripDetailView called ===")
-        print(f"User: {user} (ID: {user.id})")
-        print(f"Trip ID: {trip_id}")
-        print(f"User Role: {user.role}")
+
         
         # Check if user is a driver/operator
         if user.role != 'D':
@@ -915,8 +832,7 @@ class DriverTripDetailView(views.APIView):
             user_buses = Bus.objects.filter(operator=user).values_list('id', flat=True)
             user_hiaces = Hiace.objects.filter(operator=user).values_list('id', flat=True)
             
-            print(f"User buses: {list(user_buses)}")
-            print(f"User hiaces: {list(user_hiaces)}")
+   
             
             # Check bus schedules
             try:
@@ -1027,8 +943,8 @@ class DriverTripDetailView(views.APIView):
             booking_status__in=['PAID', 'CONFIRMED']
         )
         total_earnings = bookings.aggregate(total=Sum('total_amount'))['total'] or 0
-        platform_fee = float(total_earnings) * 0.10
-        driver_earnings = float(total_earnings) - platform_fee
+        platform_fee = bookings.aggregate(total=Sum('platform_amount'))['total'] or 0
+        driver_earnings = float(total_earnings) - float(platform_fee)
 
         # Get status
         now = timezone.now()
