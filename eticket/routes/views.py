@@ -111,7 +111,6 @@ class BusRouteViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        print("+++++++++++++++++++++++",user)
         return Route.objects.filter(status='ACTIVE',operator=user)
 
     @action(detail=False, methods=['get'], url_path='routestop')
@@ -323,8 +322,8 @@ class PopularRouteView(views.APIView):
 
 
 
-# Create Bus Route, RouteStop & RouteFare
 class CreateBusRouteView(views.APIView):
+
     @transaction.atomic
     def post(self, request):
         user = request.user
@@ -342,35 +341,67 @@ class CreateBusRouteView(views.APIView):
         try:
             route = Route.objects.create(
                 bus_id=data.get("vehicle"),
-                operator = user,
+                operator=user,
                 source_city_id=data.get("source_city"),
                 destination_city_id=data.get("destination_city"),
                 distance=data.get("distance"),
                 duration=parse_duration(data.get("duration")),
             )
 
-            # Create Stops
-            routes_ids = []
+
+            route_stops = {}
+
             for stop in data.get("stops", []):
                 obj = RouteStop.objects.create(
                     route=route,
                     city_id=stop.get("city"),
                     stop_order=stop.get("stop_order"),
-                    arrival_offset=parse_duration(stop.get("arrival_offset")),
-                    departure_offset=parse_duration(stop.get("departure_offset")),
+                    arrival_offset=parse_duration(
+                        stop.get("arrival_offset")
+                    ),
+                    departure_offset=parse_duration(
+                        stop.get("departure_offset")
+                    ),
                     is_boarding=stop.get("is_boarding", True),
                     is_dropping=stop.get("is_dropping", True),
                 )
-                routes_ids.append(obj.id)
 
-            # Create Fares
-            for index, fare in enumerate(data.get("fares", [])):
-                if index + 1 >= len(routes_ids):
-                    break
+                # Key = stop_order
+                route_stops[obj.stop_order] = obj
+
+                print(
+                    "STOP:",
+                    "order =", obj.stop_order,
+                    "id =", obj.id,
+                    "city =", obj.city_id,
+                )
+
+            # -----------------------------
+            # Create Route Fares
+            # -----------------------------
+
+            for fare in data.get("fares", []):
+
+                from_order = fare.get("from_stop")
+                to_order = fare.get("to_stop")
+
+                from_stop = route_stops.get(from_order)
+                to_stop = route_stops.get(to_order)
+
+                if from_stop is None:
+                    raise ValueError(
+                        f"Invalid from_stop order: {from_order}"
+                    )
+
+                if to_stop is None:
+                    raise ValueError(
+                        f"Invalid to_stop order: {to_order}"
+                    )
+
                 RouteFare.objects.create(
                     route=route,
-                    from_stop_id=fare.get("from_stop"),
-                    to_stop_id=fare.get("to_stop"),
+                    from_stop=from_stop,
+                    to_stop=to_stop,
                     fare=fare.get("fare"),
                 )
 
@@ -384,6 +415,7 @@ class CreateBusRouteView(views.APIView):
 
         except Exception as e:
             traceback.print_exc()
+
             return Response(
                 {
                     "message": str(e),
