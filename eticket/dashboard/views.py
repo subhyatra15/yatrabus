@@ -6,6 +6,8 @@ from rest_framework import views, status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import api_view, permission_classes
+import logging
+logger = logging.getLogger(__name__)
 
 from bus.models import Bus
 from routes.models import Route, RouteStop
@@ -452,14 +454,13 @@ class DriverTripsView(views.APIView):
         ]
 
 
+
 class DriverTripDetailView(views.APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, trip_id):
         user = request.user
 
-        print("++++++++++++++++++++++++++++++++++HIT")
-        
         # Check if user is a driver/operator
         if user.role != 'D':
             return Response(
@@ -467,452 +468,74 @@ class DriverTripDetailView(views.APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        try:
-            trip = None
-            trip_type = None
-            
-            # Get all buses and hiaces belonging to this driver
-            user_buses = Bus.objects.filter(operator=user).values_list('id', flat=True)
-            user_hiaces = Hiace.objects.filter(operator=user).values_list('id', flat=True)
-            
-            print(f"User buses: {list(user_buses)}")
-            print(f"User hiaces: {list(user_hiaces)}")
-            
-            # Check bus schedules
-            if user_buses:
-                try:
-                    bus_schedule = Schedule.objects.select_related(
-                        'route',
-                        'route__source_city',
-                        'route__destination_city',
-                        'route__bus',
-                        'route__operator'
-                    ).get(
-                        id=trip_id,
-                        route__bus__in=user_buses
-                    )
-                    trip = bus_schedule
-                    trip_type = 'bus'
-                    print(f"Found bus schedule: {bus_schedule.id} - {bus_schedule.route}")
-                except Schedule.DoesNotExist:
-                    print(f"No bus schedule found for trip {trip_id}")
+        vehicle_type = request.query_params.get('vehicleType', '').lower()
 
-            # If not found, check hiace schedules
-            if not trip and user_hiaces:
-                try:
-                    hiace_schedule = HiaceSchedule.objects.select_related(
-                        'route',
-                        'route__source_city',
-                        'route__destination_city',
-                        'route__hiace',
-                        'route__operator'
-                    ).get(
-                        id=trip_id,
-                        route__hiace__in=user_hiaces
-                    )
-                    trip = hiace_schedule
-                    trip_type = 'hiace'
-                    print(f"Found hiace schedule: {hiace_schedule.id} - {hiace_schedule.route}")
-                except HiaceSchedule.DoesNotExist:
-                    print(f"No hiace schedule found for trip {trip_id}")
-            
-            if not trip:
-                # Check if schedule exists but belongs to another operator
-                bus_exists = Schedule.objects.filter(id=trip_id).exists()
-                hiace_exists = HiaceSchedule.objects.filter(id=trip_id).exists()
-                
-                if bus_exists or hiace_exists:
-                    return Response(
-                        {'error': f'Trip with ID {trip_id} exists but belongs to another operator'},
-                        status=status.HTTP_404_NOT_FOUND
-                    )
-                
-                # Return demo data for testing
-                return self.get_demo_trip_response(trip_id, user)
-
-            print(f"Trip found! Type: {trip_type}")
-            
-            # Build response based on trip type
-            if trip_type == 'bus':
-                return self.build_bus_trip_response(trip, user)
-            else:
-                return self.build_hiace_trip_response(trip, user)
-
-        except Exception as e:
-            print(f"Error fetching trip details: {e}")
-            import traceback
-            traceback.print_exc()
+        if vehicle_type not in ('bus', 'hiace'):
             return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {'error': "Missing or invalid 'vehicleType'. Must be 'bus' or 'hiace'."},
+                status=status.HTTP_400_BAD_REQUEST
             )
 
-    def build_bus_trip_response(self, schedule, user):
-        route = schedule.route
-        bus = route.bus
-        
-        # Get booked seats
-        booked_seats = BookingSeat.objects.filter(
-            booking__schedule=schedule,
-            booking__booking_status__in=['PAID', 'CONFIRMED']
-        )
-        
-        # Get passengers
-        passengers = []
-        for seat in booked_seats:
-            booking = seat.booking
-            passengers.append({
-                'id': booking.id,
-                'name': booking.customer.fullName,
-                'seatNumber': seat.seat.seat_number,
-                'bookingId': booking.booking_number,
-                'status': 'confirmed' if booking.booking_status == 'CONFIRMED' else 'checked_in',
-                'phone': getattr(booking.customer, 'phone', None),
-                'email': booking.customer.email,
-            })
-
-        # Get stops
-        stops = RouteStop.objects.filter(route=route).order_by('stop_order')
-        stops_data = []
-        for stop in stops:
-            stops_data.append({
-                'name': stop.city.name,
-                'time': (schedule.departure_datetime + stop.arrival_offset).strftime('%I:%M %p'),
-                'type': 'boarding' if stop.is_boarding else 'dropping',
-            })
-
-        # Get earnings
-        bookings = Booking.objects.filter(
-            schedule=schedule,
-            booking_status__in=['PAID', 'CONFIRMED']
-        )
-        total_earnings = bookings.aggregate(total=Sum('total_amount'))['total'] or 0
-        platform_fee = bookings.aggregate(total=Sum('platform_amount'))['total'] or 0
-        print("+++++++++++++++++++++++++++++++",platform_fee)
-        driver_earnings = float(total_earnings) - float(platform_fee)
-
-        # Get status
-        now = timezone.now()
-        if schedule.arrival_datetime < now:
-            status = 'completed'
-        elif schedule.departure_datetime <= now <= schedule.arrival_datetime:
-            status = 'active'
-        else:
-            status = 'upcoming'
-
-        # Get amenities
-        amenities = []
-        if bus.wifi: amenities.append('WiFi')
-        if bus.charging: amenities.append('Charging')
-        if bus.ac: amenities.append('AC')
-        if hasattr(bus, 'tv') and bus.tv: amenities.append('TV')
-
-        return Response({
-            'id': schedule.id,
-            'route': f"{route.source_city.name} → {route.destination_city.name}",
-            'from': route.source_city.name,
-            'to': route.destination_city.name,
-            'departureDate': schedule.departure_datetime.isoformat(),
-            'departureTime': schedule.departure_datetime.isoformat(),
-            'arrivalDate': schedule.arrival_datetime.isoformat(),
-            'arrivalTime': schedule.arrival_datetime.isoformat(),
-            'duration': self.format_duration(schedule.arrival_datetime - schedule.departure_datetime),
-            'vehicle': bus.bus_name,
-            'vehicleNumber': bus.bus_number,
-            'vehicleType': bus.bus_type,
-            'totalSeats': bus.total_seats,
-            'availableSeats': bus.total_seats - booked_seats.count(),
-            'bookedSeats': booked_seats.count(),
-            'fare': schedule.fare if hasattr(schedule, 'fare') else None,
-            'status': status,
-            'driver': {
-                'name': route.operator.fullName,
-                'phone': getattr(route.operator, 'phone', 'N/A'),
-                'rating': 4.8,
-            },
-            'passengers': passengers,
-            'earnings': {
-                'total': float(total_earnings),
-                'platformFee': float(platform_fee),
-                'driverEarnings': float(driver_earnings),
-            },
-            'amenities': amenities,
-            'stops': stops_data,
-        })
-
-    def build_hiace_trip_response(self, schedule, user):
-        route = schedule.route
-        hiace = route.hiace
-        
-        # Get booked seats
-        booked_seats = HiaceBookingSeat.objects.filter(
-            booking__schedule=schedule,
-            booking__booking_status__in=['PAID', 'CONFIRMED']
-        )
-        
-        # Get passengers
-        passengers = []
-        for seat in booked_seats:
-            booking = seat.booking
-            passengers.append({
-                'id': booking.id,
-                'name': booking.customer.fullName,
-                'seatNumber': seat.seat.seat_number,
-                'bookingId': booking.booking_number,
-                'status': 'confirmed' if booking.booking_status == 'CONFIRMED' else 'checked_in',
-                'phone': getattr(booking.customer, 'phone', None),
-                'email': booking.customer.email,
-            })
-
-        # Get stops
-        stops = HiaceRouteStop.objects.filter(route=route).order_by('stop_order')
-        stops_data = []
-        for stop in stops:
-            stops_data.append({
-                'name': stop.city.name,
-                'time': (schedule.departure_datetime + stop.arrival_offset).strftime('%I:%M %p'),
-                'type': 'boarding' if stop.is_boarding else 'dropping',
-            })
-
-        # Get earnings
-        bookings = HiaceBooking.objects.filter(
-            schedule=schedule,
-            booking_status__in=['PAID', 'CONFIRMED']
-        )
-        total_earnings = bookings.aggregate(total=Sum('total_amount'))['total'] or 0
-        platform_fee = float(total_earnings) * 0.10
-        driver_earnings = float(total_earnings) - platform_fee
-
-        # Get status
-        now = timezone.now()
-        if schedule.arrival_datetime < now:
-            status = 'completed'
-        elif schedule.departure_datetime <= now <= schedule.arrival_datetime:
-            status = 'active'
-        else:
-            status = 'upcoming'
-
-        # Get amenities
-        amenities = []
-        if hiace.wifi: amenities.append('WiFi')
-        if hiace.charging: amenities.append('Charging')
-        if hiace.ac: amenities.append('AC')
-
-        return Response({
-            'id': schedule.id,
-            'route': f"{route.source_city.name} → {route.destination_city.name}",
-            'from': route.source_city.name,
-            'to': route.destination_city.name,
-            'departureDate': schedule.departure_datetime.isoformat(),
-            'departureTime': schedule.departure_datetime.isoformat(),
-            'arrivalDate': schedule.arrival_datetime.isoformat(),
-            'arrivalTime': schedule.arrival_datetime.isoformat(),
-            'duration': self.format_duration(schedule.arrival_datetime - schedule.departure_datetime),
-            'vehicle': hiace.hiace_name,
-            'vehicleNumber': hiace.hiace_number,
-            'vehicleType': hiace.hiace_type,
-            'totalSeats': hiace.total_seats,
-            'availableSeats': hiace.total_seats - booked_seats.count(),
-            'bookedSeats': booked_seats.count(),
-            'fare': schedule.fare if hasattr(schedule, 'fare') else None,
-            'status': status,
-            'driver': {
-                'name': route.operator.fullName,
-                'phone': getattr(route.operator, 'phone', 'N/A'),
-                'rating': 4.8,
-            },
-            'passengers': passengers,
-            'earnings': {
-                'total': float(total_earnings),
-                'platformFee': float(platform_fee),
-                'driverEarnings': float(driver_earnings),
-            },
-            'amenities': amenities,
-            'stops': stops_data,
-        })
-
-    def format_duration(self, duration):
-        """Format duration to readable string"""
-        total_seconds = int(duration.total_seconds())
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-        
-        if hours > 0 and minutes > 0:
-            return f"{hours}h {minutes}m"
-        elif hours > 0:
-            return f"{hours}h"
-        else:
-            return f"{minutes}m"
-
-    def get_demo_trip_response(self, trip_id, user):
-        """Return demo trip data for testing"""
-        now = timezone.now()
-        
-        return Response({
-            'id': int(trip_id),
-            'route': 'Kathmandu → Pokhara',
-            'from': 'Kathmandu',
-            'to': 'Pokhara',
-            'departureDate': (now + timedelta(hours=1)).isoformat(),
-            'departureTime': (now + timedelta(hours=1)).isoformat(),
-            'arrivalDate': (now + timedelta(hours=6, minutes=30)).isoformat(),
-            'arrivalTime': (now + timedelta(hours=6, minutes=30)).isoformat(),
-            'duration': '5h 30m',
-            'vehicle': 'Sajha Bus',
-            'vehicleNumber': 'BA 1 KA 1234',
-            'vehicleType': 'AC',
-            'totalSeats': 40,
-            'availableSeats': 8,
-            'bookedSeats': 32,
-            'status': 'upcoming',
-            'driver': {
-                'name': user.fullName,
-                'phone': getattr(user, 'phone', 'N/A'),
-                'rating': 4.8,
-            },
-            'passengers': [
-                {
-                    'id': 1,
-                    'name': 'Rahul Sharma',
-                    'seatNumber': 'A1',
-                    'bookingId': 'BK-12345',
-                    'status': 'confirmed',
-                    'phone': '+977 984-1234567',
-                    'email': 'rahul@example.com',
-                },
-                {
-                    'id': 2,
-                    'name': 'Sita Giri',
-                    'seatNumber': 'A2',
-                    'bookingId': 'BK-12346',
-                    'status': 'checked_in',
-                    'phone': '+977 984-1234568',
-                    'email': 'sita@example.com',
-                }
-            ],
-            'earnings': {
-                'total': 48000.0,
-                'platformFee': 4800.0,
-                'driverEarnings': 43200.0,
-            },
-            'amenities': ['WiFi', 'Charging', 'AC', 'TV'],
-            'stops': [
-                {'name': 'Kathmandu', 'time': '08:00 AM', 'type': 'boarding'},
-                {'name': 'Naubise', 'time': '09:30 AM', 'type': 'boarding'},
-                {'name': 'Pokhara', 'time': '01:30 PM', 'type': 'dropping'},
-            ]
-        })
-
-
-
-class DriverTripDetailView(views.APIView):
-    """
-    Get detailed information about a specific trip for a driver
-    Supports both Bus and Hiace schedules
-    """
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, trip_id):
-        user = request.user
-        
-
-        
-        # Check if user is a driver/operator
-        if user.role != 'D':
-            return Response(
-                {'error': 'Access denied. Only drivers can access this endpoint.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        # Get all buses and hiaces belonging to this driver
+        user_buses = Bus.objects.filter(operator=user).values_list('id', flat=True)
+        user_hiaces = Hiace.objects.filter(operator=user).values_list('id', flat=True)
 
         try:
-            trip = None
-            trip_type = None
-            
-            # Get all buses and hiaces belonging to this driver
-            user_buses = Bus.objects.filter(operator=user).values_list('id', flat=True)
-            user_hiaces = Hiace.objects.filter(operator=user).values_list('id', flat=True)
-            
-   
-            
-            # Check bus schedules
-            try:
-                bus_schedule = Schedule.objects.select_related(
+            if vehicle_type == 'bus':
+                trip = Schedule.objects.select_related(
                     'route',
                     'route__source_city',
                     'route__destination_city',
                     'route__bus',
-                    'route__operator'
-                ).get(
-                    id=trip_id,
-                    route__bus__in=user_buses  # Only get schedules for user's buses
-                )
-                trip = bus_schedule
-                trip_type = 'bus'
-                print(f"Found bus schedule: {bus_schedule.id} - {bus_schedule.route}")
-            except Schedule.DoesNotExist:
-                print(f"No bus schedule found for trip {trip_id} belonging to user {user.id}")
-
-            # If not found, check hiace schedules
-            if not trip:
-                try:
-                    hiace_schedule = HiaceSchedule.objects.select_related(
-                        'route',
-                        'route__source_city',
-                        'route__destination_city',
-                        'route__hiace',
-                        'route__operator'
-                    ).get(
-                        id=trip_id,
-                        route__hiace__in=user_hiaces  # Only get schedules for user's hiaces
-                    )
-                    trip = hiace_schedule
-                    trip_type = 'hiace'
-                    print(f"Found hiace schedule: {hiace_schedule.id} - {hiace_schedule.route}")
-                except HiaceSchedule.DoesNotExist:
-                    print(f"No hiace schedule found for trip {trip_id} belonging to user {user.id}")
-            
-            if not trip:
-                # Check if schedule exists but belongs to another operator
-                bus_exists = Schedule.objects.filter(id=trip_id).exists()
-                hiace_exists = HiaceSchedule.objects.filter(id=trip_id).exists()
-                
-                error_message = f'Trip with ID {trip_id} not found for this operator'
-                
-                if bus_exists or hiace_exists:
-                    error_message = f'Trip with ID {trip_id} exists but belongs to another operator'
-                
-                return Response(
-                    {'error': error_message},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-
-            print(f"Trip found! Type: {trip_type}")
-            
-            # Build response based on trip type
-            if trip_type == 'bus':
+                    'route__operator',
+                ).get(id=trip_id, route__bus__in=user_buses)
                 return self.build_bus_trip_response(trip, user)
-            else:
+
+            else:  # hiace
+                trip = HiaceSchedule.objects.select_related(
+                    'route',
+                    'route__source_city',
+                    'route__destination_city',
+                    'route__hiace',
+                    'route__operator',
+                ).get(id=trip_id, route__hiace__in=user_hiaces)
                 return self.build_hiace_trip_response(trip, user)
 
+        except (Schedule.DoesNotExist, HiaceSchedule.DoesNotExist):
+            # Determine if it exists but belongs to someone else
+            if vehicle_type == 'bus':
+                exists_elsewhere = Schedule.objects.filter(id=trip_id).exists()
+            else:
+                exists_elsewhere = HiaceSchedule.objects.filter(id=trip_id).exists()
+
+            msg = (
+                f'Trip with ID {trip_id} exists but belongs to another operator'
+                if exists_elsewhere else
+                f'Trip with ID {trip_id} not found for this operator'
+            )
+            return Response({'error': msg}, status=status.HTTP_404_NOT_FOUND)
+
         except Exception as e:
-            print(f"Error fetching trip details: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("Error fetching trip details")
             return Response(
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+    # ------------------------------------------------------------------ #
+    #  Response builders
+    # ------------------------------------------------------------------ #
+
     def build_bus_trip_response(self, schedule, user):
         route = schedule.route
         bus = route.bus
-        
+
         # Get booked seats
         booked_seats = BookingSeat.objects.filter(
             booking__schedule=schedule,
             booking__booking_status__in=['PAID', 'CONFIRMED']
         )
-        
+
         # Get passengers
         passengers = []
         for seat in booked_seats:
@@ -946,24 +569,29 @@ class DriverTripDetailView(views.APIView):
         platform_fee = bookings.aggregate(total=Sum('platform_amount'))['total'] or 0
         driver_earnings = float(total_earnings) - float(platform_fee)
 
-        # Get status
+        # Get status (renamed to avoid shadowing the `status` module)
         now = timezone.now()
         if schedule.arrival_datetime < now:
-            status = 'completed'
+            trip_status = 'completed'
         elif schedule.departure_datetime <= now <= schedule.arrival_datetime:
-            status = 'active'
+            trip_status = 'active'
         else:
-            status = 'upcoming'
+            trip_status = 'upcoming'
 
         # Get amenities
         amenities = []
-        if bus.wifi: amenities.append('WiFi')
-        if bus.charging: amenities.append('Charging')
-        if bus.ac: amenities.append('AC')
-        if hasattr(bus, 'tv') and bus.tv: amenities.append('TV')
+        if bus.wifi:
+            amenities.append('WiFi')
+        if bus.charging:
+            amenities.append('Charging')
+        if bus.ac:
+            amenities.append('AC')
+        if hasattr(bus, 'tv') and bus.tv:
+            amenities.append('TV')
 
         return Response({
             'id': schedule.id,
+            'vehicleType': 'bus',
             'route': f"{route.source_city.name} → {route.destination_city.name}",
             'from': route.source_city.name,
             'to': route.destination_city.name,
@@ -979,7 +607,7 @@ class DriverTripDetailView(views.APIView):
             'availableSeats': bus.total_seats - booked_seats.count(),
             'bookedSeats': booked_seats.count(),
             'fare': schedule.fare if hasattr(schedule, 'fare') else None,
-            'status': status,
+            'status': trip_status,
             'driver': {
                 'name': route.operator.fullName,
                 'phone': getattr(route.operator, 'phone', 'N/A'),
@@ -998,13 +626,13 @@ class DriverTripDetailView(views.APIView):
     def build_hiace_trip_response(self, schedule, user):
         route = schedule.route
         hiace = route.hiace
-        
+
         # Get booked seats
         booked_seats = HiaceBookingSeat.objects.filter(
             booking__schedule=schedule,
             booking__booking_status__in=['PAID', 'CONFIRMED']
         )
-        
+
         # Get passengers
         passengers = []
         for seat in booked_seats:
@@ -1038,23 +666,26 @@ class DriverTripDetailView(views.APIView):
         platform_fee = float(total_earnings) * 0.10
         driver_earnings = float(total_earnings) - platform_fee
 
-        # Get status
         now = timezone.now()
         if schedule.arrival_datetime < now:
-            status = 'completed'
+            trip_status = 'completed'
         elif schedule.departure_datetime <= now <= schedule.arrival_datetime:
-            status = 'active'
+            trip_status = 'active'
         else:
-            status = 'upcoming'
+            trip_status = 'upcoming'
 
         # Get amenities
         amenities = []
-        if hiace.wifi: amenities.append('WiFi')
-        if hiace.charging: amenities.append('Charging')
-        if hiace.ac: amenities.append('AC')
+        if hiace.wifi:
+            amenities.append('WiFi')
+        if hiace.charging:
+            amenities.append('Charging')
+        if hiace.ac:
+            amenities.append('AC')
 
         return Response({
             'id': schedule.id,
+            'vehicleType': 'hiace',
             'route': f"{route.source_city.name} → {route.destination_city.name}",
             'from': route.source_city.name,
             'to': route.destination_city.name,
@@ -1070,7 +701,7 @@ class DriverTripDetailView(views.APIView):
             'availableSeats': hiace.total_seats - booked_seats.count(),
             'bookedSeats': booked_seats.count(),
             'fare': schedule.fare if hasattr(schedule, 'fare') else None,
-            'status': status,
+            'status': trip_status,
             'driver': {
                 'name': route.operator.fullName,
                 'phone': getattr(route.operator, 'phone', 'N/A'),
@@ -1086,6 +717,7 @@ class DriverTripDetailView(views.APIView):
             'stops': stops_data,
         })
 
+
     def format_duration(self, duration):
         """Format duration to readable string"""
         total_seconds = int(duration.total_seconds())
@@ -1098,6 +730,7 @@ class DriverTripDetailView(views.APIView):
             return f"{hours}h"
         else:
             return f"{minutes}m"
+
         
 class DriverVehiclesView(views.APIView):
   

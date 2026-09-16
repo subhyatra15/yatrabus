@@ -7,7 +7,10 @@ from .views import (
     HiaceRouteViewSet,
     SeatViewSet,
     CreateHiaceRouteView,
-    CreateHiaceScheduleView
+    CreateHiaceScheduleView,
+    SelectSeatView,
+    ReleaseSeatView,
+    SelectedSeatsView
 )
 
 router = DefaultRouter()
@@ -31,6 +34,29 @@ urlpatterns = [
         name="hiace-routes-create",
     ),
     path('hiace-schedule/', CreateHiaceScheduleView.as_view(), name='create-hiace-schedule'),
+     # Select a seat
+        path(
+            "hiacetrips/<int:trip_id>/seats/<str:seat_id>/select/",
+            SelectSeatView.as_view(),
+            name="select-seat",
+        ),
+    
+        # Release a selected seat
+        path(
+            "hiacetrips/<int:trip_id>/seats/<str:seat_id>/release/",
+            ReleaseSeatView.as_view(),
+            name="release-seat",
+        ),
+    
+        # Get temporarily selected seats
+        path(
+            "hiacetrips/<int:trip_id>/seats/selected/",
+            SelectedSeatsView.as_view(),
+            name="selected-seats",
+        ),
     path('', include(router.urls))
+
+
+   
 ]
 

@@ -7,7 +7,9 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from booking.models import Booking
-from .models import Payment, PaymentLog
+from hiace.models import HiaceBooking
+from .models import Payment, PaymentLog,HiacePayment
+
 from .serializers import PaymentSerializer
 
 import hmac
@@ -217,9 +219,96 @@ class EsewaInitiateView(views.APIView):
             },
             status=status.HTTP_200_OK
         )
+
+
+
+
+# Esewa Payment Initiate For Hiace
+class EsewaInitiateViewHiace(views.APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+
+        booking_id = request.data.get("booking_id")
+
+        if not booking_id:
+            return Response(
+                {"error": "booking_id is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            booking = HiaceBooking.objects.get(
+                id=booking_id,
+                customer=request.user
+            )
+        except Booking.DoesNotExist:
+            return Response(
+                {"error": "Booking not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if booking.booking_status != "PENDING":
+            return Response(
+                {"error": "Only pending bookings can be paid."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        transaction_uuid = str(uuid.uuid4())
+        amount = str(booking.total_amount)
+        tax_amount = "0"
+        product_service_charge = "0"
+        product_delivery_charge = "0"
+        total_amount = amount
+
+        signed_field_names = "total_amount,transaction_uuid,product_code"
+
+        message = (
+            f"total_amount={total_amount},"
+            f"transaction_uuid={transaction_uuid},"
+            f"product_code={settings.ESEWA_PRODUCT_CODE}"
+        )
+
+        signature = base64.b64encode(
+            hmac.new(
+                settings.ESEWA_SECRET_KEY.encode(),
+                message.encode(),
+                hashlib.sha256
+            ).digest()
+        ).decode()
+
+        payment, created = HiacePayment.objects.update_or_create(
+            booking=booking,
+            payment_method="ESEWA",
+            defaults={
+                "customer": request.user,
+                "amount": booking.total_amount,
+                "transaction_id": transaction_uuid,
+                "status": "PENDING",
+                "gateway": "ESEWA",
+            }
+        )
+
+        return Response(
+            {
+                "payment_url": settings.ESEWA_PAYMENT_URL,
+                "amount": amount,
+                "tax_amount": tax_amount,
+                "total_amount": total_amount,
+                "transaction_uuid": transaction_uuid,
+                "product_code": settings.ESEWA_PRODUCT_CODE,
+                "product_service_charge": product_service_charge,
+                "product_delivery_charge": product_delivery_charge,
+                "success_url": settings.ESEWA_SUCCESS_URL,
+                "failure_url": settings.ESEWA_FAILURE_URL,
+                "signed_field_names": signed_field_names,
+                "signature": signature,
+            },
+            status=status.HTTP_200_OK
+        )
     
 
-# Esewa Payment Verfiy
+# Esewa Payment Verfiy 
 class EsewaVerifyView(views.APIView):
     def post(self, request):
         transaction_uuid = request.data.get("transaction_uuid")
@@ -231,6 +320,55 @@ class EsewaVerifyView(views.APIView):
             )
 
         payment_obj = Payment.objects.filter(
+            transaction_id=transaction_uuid
+        ).first()
+
+        if not payment_obj:
+            payment_obj = HiacePayment.objects.filter(
+                transaction_id=transaction_uuid
+                ).first()
+
+            if not payment_obj:
+                return Response(
+                        {"message": "Payment not found"},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+        if payment_obj.status == "SUCCESS":
+            return Response(
+                {
+                    "message": "Payment already verified",
+                    status:status.HTTP_404_NOT_FOUND
+                },
+                status=status.HTTP_200_OK
+            )
+        payment_obj.status = "SUCCESS"
+        payment_obj.save()
+
+        booking = payment_obj.booking
+        booking.booking_status = "PAID"
+        booking.save()
+
+        return Response(
+            {
+                "message": "Payment verified successfully"
+            },
+            status=status.HTTP_200_OK
+        )
+
+
+
+# Esewa Payment Verfiy  For Hiace
+class EsewaVerifyViewHiace(views.APIView):
+    def post(self, request):
+        transaction_uuid = request.data.get("transaction_uuid")
+
+        if not transaction_uuid:
+            return Response(
+                {"message": "Transaction UUID is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        payment_obj = HiacePayment.objects.filter(
             transaction_id=transaction_uuid
         ).first()
 

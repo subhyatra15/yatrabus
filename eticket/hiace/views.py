@@ -15,6 +15,14 @@ from rest_framework.exceptions import ValidationError
 import traceback
 from datetime import timedelta
 
+import json
+import redis
+
+from django.conf import settings
+from rest_framework.views import APIView
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
+
 from .models import (
     Hiace, HiaceRoute, HiaceRouteStop, HiaceRouteFare,
     HiaceSchedule, HiaceSeat, HiaceBooking, HiaceBookingSeat
@@ -360,7 +368,7 @@ class HiaceBookingViewSet(viewsets.ModelViewSet):
                 "boarding_stop",
                 "dropping_stop",
             )
-            .prefetch_related("hiace_booking_seats__seat")
+            .prefetch_related("hiace_booking_seats")
             .filter(qr_token=qr_token)
             .first()
         )
@@ -389,43 +397,41 @@ class HiaceBookingViewSet(viewsets.ModelViewSet):
         if not boarding_stop_id or not dropping_stop_id:
             return Response(
                 {"message": "Both boarding stop and dropping stop are required."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Get schedule with lock to prevent race conditions
         try:
-            schedule = HiaceSchedule.objects.select_for_update().select_related(
-                "route",
-                "route__hiace"
-            ).get(id=request.data.get("schedule"))
+            schedule = (
+                HiaceSchedule.objects.select_for_update()
+                .select_related("route", "route__hiace")
+                .get(id=request.data.get("schedule"))
+            )
         except HiaceSchedule.DoesNotExist:
             return Response(
                 {"message": "Schedule not found."},
-                status=status.HTTP_404_NOT_FOUND
+                status=status.HTTP_404_NOT_FOUND,
             )
 
         # Validate boarding and dropping stops
         try:
             boarding_stop = HiaceRouteStop.objects.get(
-                id=boarding_stop_id,
-                route=schedule.route
+                id=boarding_stop_id, route=schedule.route
             )
-
             dropping_stop = HiaceRouteStop.objects.get(
-                id=dropping_stop_id,
-                route=schedule.route
+                id=dropping_stop_id, route=schedule.route
             )
         except HiaceRouteStop.DoesNotExist:
             return Response(
                 {"message": "Invalid boarding or dropping stop for this route."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Boarding must come before dropping
         if boarding_stop.stop_order >= dropping_stop.stop_order:
             return Response(
                 {"message": "Boarding stop must be before dropping stop."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Selected seats
@@ -434,55 +440,46 @@ class HiaceBookingViewSet(viewsets.ModelViewSet):
         if not seats:
             return Response(
                 {"message": "Please select at least one seat."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ---------------------------------------------------------
-        # Validate seats belong to this Hiace
-        # ---------------------------------------------------------
-
+    
         seat_ids = [item.get("seat") for item in seats]
 
         if None in seat_ids:
             return Response(
                 {"message": "Invalid seat data."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Change HiaceSeat to your actual Hiace seat model name
         seat_objects = HiaceSeat.objects.filter(
-            id__in=seat_ids,
-            hiace=schedule.route.hiace
+            id__in=seat_ids, hiace=schedule.route.hiace
         )
 
         if seat_objects.count() != len(seat_ids):
             return Response(
                 {"message": "One or more selected seats do not belong to this Hiace."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Prevent duplicate seat IDs in same request
         if len(set(seat_ids)) != len(seat_ids):
             return Response(
                 {"message": "Duplicate seats cannot be selected."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Seat extra prices
         seat_extra_prices = {
-            seat.id: seat.extra_price or Decimal("0.00")
-            for seat in seat_objects
+            seat.id: seat.extra_price or Decimal("0.00") for seat in seat_objects
         }
 
-        # ---------------------------------------------------------
-        # Check available seats
-        # ---------------------------------------------------------
-
+    
         total_seats = schedule.route.hiace.total_seats
 
         booked_seats_count = HiaceBookingSeat.objects.filter(
             booking__schedule=schedule,
-            booking__booking_status__in=["PENDING", "PAID"]
+            booking__booking_status__in=["PENDING", "PAID"],
         ).count()
 
         available_seats = total_seats - booked_seats_count
@@ -495,63 +492,44 @@ class HiaceBookingViewSet(viewsets.ModelViewSet):
                         f"Only {available_seats} seats available."
                     )
                 },
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ---------------------------------------------------------
-        # Check individual seats
-        # ---------------------------------------------------------
 
-        already_booked_seats = HiaceBookingSeat.objects.filter(
-            booking__schedule=schedule,
-            seat_id__in=seat_ids,
-            booking__booking_status__in=["PENDING", "PAID"]
-        ).values_list("seat_id", flat=True)
-
-        already_booked_seats = list(already_booked_seats)
+        already_booked_seats = list(
+            HiaceBookingSeat.objects.filter(
+                booking__schedule=schedule,
+                seat_id__in=seat_ids,
+                booking__booking_status__in=["PENDING", "PAID"],
+            ).values_list("seat_id", flat=True)
+        )
 
         if already_booked_seats:
             return Response(
-                {
-                    "message": (
-                        f"Seats {already_booked_seats} are already booked."
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST
+                {"message": f"Seats {already_booked_seats} are already booked."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
-
-        # ---------------------------------------------------------
-        # Get route fare
-        # ---------------------------------------------------------
 
         try:
             route_fare = HiaceRouteFare.objects.get(
                 route=schedule.route,
                 from_stop=boarding_stop,
-                to_stop=dropping_stop
+                to_stop=dropping_stop,
             )
-
             base_fare_per_seat = route_fare.fare
-
         except HiaceRouteFare.DoesNotExist:
             return Response(
                 {"message": "Fare not configured for this route segment."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ---------------------------------------------------------
-        # Get system settings
-        # ---------------------------------------------------------
 
         try:
             settings = Settings.objects.first()
-
             if not settings:
                 raise Settings.DoesNotExist
-
             tax_percentage = settings.tax
             platform_cost_percentage = settings.platform_cost
-
         except Settings.DoesNotExist:
             return Response(
                 {
@@ -560,12 +538,8 @@ class HiaceBookingViewSet(viewsets.ModelViewSet):
                         "Please contact support."
                     )
                 },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-
-        # ---------------------------------------------------------
-        # Calculate fare
-        # ---------------------------------------------------------
 
         total_fare = Decimal("0.00")
         booking_seats_data = []
@@ -575,71 +549,32 @@ class HiaceBookingViewSet(viewsets.ModelViewSet):
         if discount < 0:
             return Response(
                 {"message": "Discount cannot be negative."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         for item in seats:
-
             seat_id = item["seat"]
-
-            extra_price = seat_extra_prices.get(
-                seat_id,
-                Decimal("0.00")
-            )
-
-            fare_per_seat = (
-                base_fare_per_seat +
-                extra_price
-            )
-
+            extra_price = seat_extra_prices.get(seat_id, Decimal("0.00"))
+            fare_per_seat = base_fare_per_seat + extra_price
             total_fare += fare_per_seat
+            booking_seats_data.append({"seat_id": seat_id, "price": fare_per_seat})
 
-            booking_seats_data.append(
-                {
-                    "seat_id": seat_id,
-                    "price": fare_per_seat
-                }
-            )
-
-        # ---------------------------------------------------------
-        # Discount
-        # ---------------------------------------------------------
 
         if discount > total_fare:
             return Response(
                 {"message": "Discount cannot exceed total fare."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         discounted_fare = total_fare - discount
 
-        # ---------------------------------------------------------
-        # Platform fee and tax
-        # ---------------------------------------------------------
 
-        platform_fee = (
-            discounted_fare *
-            platform_cost_percentage
-        )
+        platform_fee = (discounted_fare * platform_cost_percentage) / 100
+        tax_amount = (discounted_fare * tax_percentage) / 100
 
-        tax_amount = (
-            discounted_fare *
-            tax_percentage
-        )
 
-        # ---------------------------------------------------------
-        # Final total
-        # ---------------------------------------------------------
+        total = discounted_fare + platform_fee + tax_amount
 
-        total = (
-            discounted_fare +
-            platform_fee +
-            tax_amount
-        )
-
-        # ---------------------------------------------------------
-        # Create booking
-        # ---------------------------------------------------------
 
         booking = HiaceBooking.objects.create(
             booking_number=f"HK-{uuid.uuid4().hex[:10].upper()}",
@@ -647,36 +582,23 @@ class HiaceBookingViewSet(viewsets.ModelViewSet):
             schedule=schedule,
             boarding_stop=boarding_stop,
             dropping_stop=dropping_stop,
-
             subtotal=total_fare,
             discount=discount,
             tax=tax_amount,
             platform_amount=platform_fee,
             total_amount=total,
-
             booking_status="PENDING",
         )
 
-        # ---------------------------------------------------------
-        # Create booking seats
-        # ---------------------------------------------------------
-
-        booking_seats = []
-
-        for seat_data in booking_seats_data:
-            booking_seats.append(
-                HiaceBookingSeat(
-                    booking=booking,
-                    seat_id=seat_data["seat_id"],
-                    price=seat_data["price"]
-                )
+        booking_seats = [
+            HiaceBookingSeat(
+                booking=booking,
+                seat_id=seat_data["seat_id"],
+                price=seat_data["price"],
             )
-
+            for seat_data in booking_seats_data
+        ]
         HiaceBookingSeat.objects.bulk_create(booking_seats)
-
-        # ---------------------------------------------------------
-        # Response
-        # ---------------------------------------------------------
 
         serializer = HiaceBookingSerializer(booking)
 
@@ -686,38 +608,24 @@ class HiaceBookingViewSet(viewsets.ModelViewSet):
                 "data": serializer.data,
                 "breakdown": {
                     "base_fare_per_seat": float(base_fare_per_seat),
-
                     "seat_extras": [
                         {
                             "seat_id": seat_data["seat_id"],
-                            "extra_price": float(
-                                seat_extra_prices[
-                                    seat_data["seat_id"]
-                                ]
-                            )
+                            "extra_price": float(seat_extra_prices[seat_data["seat_id"]]),
                         }
                         for seat_data in booking_seats_data
                     ],
-
                     "total_fare": float(total_fare),
                     "discount": float(discount),
                     "discounted_fare": float(discounted_fare),
-
                     "platform_fee": float(platform_fee),
                     "tax": float(tax_amount),
-
-                    "tax_percentage": float(
-                        tax_percentage * 100
-                    ),
-
-                    "platform_percentage": float(
-                        platform_cost_percentage * 100
-                    ),
-
-                    "total": float(total)
-                }
+                    "tax_percentage": float(tax_percentage),
+                    "platform_percentage": float(platform_cost_percentage),
+                    "total": float(total),
+                },
             },
-            status=status.HTTP_201_CREATED
+            status=status.HTTP_201_CREATED,
         )
 
 
@@ -1079,3 +987,179 @@ class CreateHiaceScheduleView(views.APIView):
             current_date += timedelta(days=1)
         
         return schedules_created
+
+
+
+
+
+redis_client = redis.Redis.from_url(
+    settings.REDIS_URL,
+    decode_responses=True,
+)
+
+
+# --------------------------------------------------
+# HIACE SEAT KEY — different prefix from bus
+# --------------------------------------------------
+def hiace_seat_key(trip_id, seat_id):
+    return f"hiace_trip:{trip_id}:seat:{seat_id}:selected"
+
+
+# --------------------------------------------------
+# HIACE: SELECT SEAT
+# --------------------------------------------------
+class SelectSeatView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, trip_id, seat_id):
+
+        key = hiace_seat_key(trip_id, seat_id)
+
+        data = {
+            "user_id": request.user.id,
+            "name": request.user.fullName,
+        }
+
+        created = redis_client.set(
+            key,
+            json.dumps(data),
+            nx=True,
+            ex=600,  # 10 minutes TTL
+        )
+
+        if not created:
+
+            existing = redis_client.get(key)
+
+            existing_data = (
+                json.loads(existing)
+                if existing
+                else None
+            )
+
+            return Response(
+                {
+                    "success": False,
+                    "message": "Seat is already selected",
+                    "selected_by": existing_data,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        channel_layer = get_channel_layer()
+
+        async_to_sync(
+            channel_layer.group_send
+        )(
+            f"hiace_trip_seats_{trip_id}",
+            {
+                "type": "seat_selected",
+                "seat_id": seat_id,
+                "user_id": request.user.id,
+                "username": request.user.fullName,
+            },
+        )
+
+        return Response(
+            {
+                "success": True,
+                "seat_id": seat_id,
+                "selected_by": request.user.id,
+                "username": request.user.fullName,
+                "message": "Seat selected",
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+# --------------------------------------------------
+# HIACE: RELEASE SEAT
+# --------------------------------------------------
+class ReleaseSeatView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, trip_id, seat_id):
+
+        key = hiace_seat_key(trip_id, seat_id)
+
+        value = redis_client.get(key)
+
+        if not value:
+            return Response({
+                "success": True,
+                "message": "Seat is already available",
+            })
+
+        data = json.loads(value)
+
+        if data["user_id"] != request.user.id:
+
+            return Response(
+                {
+                    "success": False,
+                    "message": "You cannot release this seat",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        redis_client.delete(key)
+
+        channel_layer = get_channel_layer()
+
+        async_to_sync(
+            channel_layer.group_send
+        )(
+            f"hiace_trip_seats_{trip_id}",
+            {
+                "type": "seat_available",
+                "seat_id": seat_id,
+            },
+        )
+
+        return Response({
+            "success": True,
+            "seat_id": seat_id,
+            "message": "Seat released",
+        })
+
+
+# --------------------------------------------------
+# HIACE: GET SELECTED SEATS
+# --------------------------------------------------
+class SelectedSeatsView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, trip_id):
+
+        pattern = f"hiace_trip:{trip_id}:seat:*:selected"
+
+        selected = []
+
+        for key in redis_client.scan_iter(match=pattern):
+
+            value = redis_client.get(key)
+
+            if not value:
+                continue
+
+            data = json.loads(value)
+
+            parts = key.split(":")
+
+            seat_id = parts[3]
+
+            selected.append({
+                "seat_id": seat_id,
+                "user_id": data["user_id"],
+                "name": data.get("name"),
+                "is_mine": (
+                    data["user_id"]
+                    == request.user.id
+                ),
+                "ttl": redis_client.ttl(key),
+            })
+
+        return Response(selected)

@@ -4,6 +4,7 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 from django.contrib.auth import get_user_model
+import uuid
 
 User = get_user_model()
 
@@ -261,7 +262,12 @@ class HiaceBooking(models.Model):
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
     qr_code = models.ImageField(upload_to="hiace_booking_qr/", blank=True, null=True)
-    qr_token = models.CharField(max_length=255, unique=True, blank=True, null=True)
+    qr_token = models.CharField(
+            max_length=255,
+            unique=True,
+            default=uuid.uuid4,
+            editable=False,
+        )
 
     boarding_stop = models.ForeignKey(
         HiaceRouteStop,

@@ -165,7 +165,12 @@ class HiaceBookingSerializer(serializers.ModelSerializer):
         read_only=True
     )
     schedule_details = HiaceScheduleSerializer(source="schedule", read_only=True)
-    booking_seats = HiaceBookingSeatSerializer(many=True, read_only=True)
+    booking_seats = HiaceBookingSeatSerializer(
+        source="hiace_booking_seats",
+        many=True,
+        read_only=True,
+    )
+    
     from_city = serializers.CharField(
         source="boarding_stop.city.name",
         read_only=True

@@ -375,7 +375,7 @@ class HiaceBookingAdmin(admin.ModelAdmin):
             'fields': (
                 'booking_number',
                 'customer',
-                'schedule',
+                'schedule'
             )
         }),
         ('Stops', {
@@ -435,8 +435,14 @@ class HiaceBookingAdmin(admin.ModelAdmin):
                 '<img src="{}" width="100" height="100" style="border-radius: 8px;" />',
                 obj.qr_code.url
             )
-        return format_html('<span style="color: #94a3b8;">No QR Code</span>')
+
+        return format_html(
+            '<span style="color: #94a3b8;">{}</span>',
+            'No QR Code'
+        )
+
     qr_code_preview.short_description = 'QR Code Preview'
+
 
     def qr_token_display(self, obj):
         if obj.qr_token:
@@ -444,7 +450,12 @@ class HiaceBookingAdmin(admin.ModelAdmin):
                 '<code style="background: #f1f5f9; padding: 4px 8px; border-radius: 4px;">{}</code>',
                 obj.qr_token
             )
-        return format_html('<span style="color: #94a3b8;">No Token</span>')
+
+        return format_html(
+            '<span style="color: #94a3b8;">{}</span>',
+            'No Token'
+        )
+
     qr_token_display.short_description = 'QR Token'
 
     def mark_as_paid(self, request, queryset):

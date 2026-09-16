@@ -7,6 +7,8 @@ from .views import (
     EsewaVerifyView,
     KhaltiInitiateView,
     KhaltiVerifyView,
+    EsewaInitiateViewHiace,
+    EsewaVerifyViewHiace
     # StripePaymentIntentView,
     # StripeWebhookView,
     # RefundView,
@@ -65,4 +67,17 @@ urlpatterns = [
     #     RefundView.as_view(),
     #     name="payment-refund",
     # ),
+
+    # eSewa for Hiace
+        path(
+            "payments/hiace/esewa/initiate/",
+            EsewaInitiateViewHiace.as_view(),
+            name="esewa-initiate",
+        ),
+        path(
+            "payments/hiace/esewa/verify/",
+            EsewaVerifyViewHiace.as_view(),
+            name="esewa-verify",
+        ),
+    
 ]
