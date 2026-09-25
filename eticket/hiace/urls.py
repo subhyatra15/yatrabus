@@ -30,8 +30,13 @@ urlpatterns = [
     ),
     path(
         "hiace-routes/create/",
+            CreateHiaceRouteView.as_view(),
+            name="hiace-routes-create",
+        ),
+    path(
+        "hiace-routes/create/<int:pk>/",
         CreateHiaceRouteView.as_view(),
-        name="hiace-routes-create",
+        name="hiace-routes-put",
     ),
     path('hiace-schedule/', CreateHiaceScheduleView.as_view(), name='create-hiace-schedule'),
      # Select a seat

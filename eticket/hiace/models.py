@@ -282,6 +282,7 @@ class HiaceBooking(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     expired_at = models.DateTimeField(blank=True, null=True)
+    departure_reminder_sent = models.BooleanField(default=False)
 
     class Meta:
         db_table = "hiace_booking"

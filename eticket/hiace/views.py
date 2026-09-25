@@ -14,6 +14,7 @@ from appsettings.models import Settings
 from rest_framework.exceptions import ValidationError
 import traceback
 from datetime import timedelta
+from django.db.models.deletion import ProtectedError
 
 import json
 import redis
@@ -638,10 +639,7 @@ class HiaceRouteViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='routestop')
     def get_route_stops(self, request):
-        """
-        Get stops for a specific route
-        Query params: routeid
-        """
+
         route_id = request.query_params.get('routeid')
         if not route_id:
             return Response(
@@ -682,10 +680,6 @@ class HiaceRouteViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='priceperseat')
     def get_price_per_seat(self, request):
-        """
-        Get price per seat between two stops
-        Query params: route, boardingstop, droppingstop
-        """
         route_id = request.query_params.get('route')
         boarding_stop_id = request.query_params.get('boardingstop')
         dropping_stop_id = request.query_params.get('droppingstop')
@@ -797,7 +791,6 @@ class CreateHiaceRouteView(views.APIView):
 
         try:
             hiace = Hiace.objects.filter(id=data.get("vehicle")).first()
-            print("+++++++++++++++++++++++++++",hiace)
             route = HiaceRoute.objects.create(
                 hiace=hiace,
                 operator = user,
@@ -842,14 +835,154 @@ class CreateHiaceRouteView(views.APIView):
 
         except Exception as e:
             traceback.print_exc()
+
             return Response(
                 {
                     "message": str(e),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
         
+    @transaction.atomic
+    def put(self, request, pk):
+        user = request.user
+
+        print("PK:", pk)
+        print("USER:", user)
+        print("USER ID:", user.id)
+        print("REQUEST BODY DATA:", request.data)
+
+        if user.role != "D":
+            return Response(
+                {"message": "User must be an operator."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        route = HiaceRoute.objects.filter(id=pk).first()
+        print("ROUTE:", route)
+
+        if not route:
+            return Response(
+                {"message": "Route not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        data = request.data
+
+        try:
+            # ---------------------------------------------------------
+            # 1) Update scalar fields on the route
+            # ---------------------------------------------------------
+            if data.get("vehicle") is not None:
+                hiace = Hiace.objects.filter(id=data.get("vehicle")).first()
+                if not hiace:
+                    return Response(
+                        {"message": "Hiace vehicle not found."},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+                route.hiace = hiace
+
+            if data.get("source_city") is not None:
+                route.source_city_id = data.get("source_city")
+
+            if data.get("destination_city") is not None:
+                route.destination_city_id = data.get("destination_city")
+
+            if data.get("distance") is not None:
+                route.distance = data.get("distance")
+
+            if data.get("duration") is not None:
+                route.duration = convertStrToDuration(data.get("duration"))
+
+            route.save()
+
+            # ---------------------------------------------------------
+            # 2) Update stops + fares (only if "stops" key present)
+            # ---------------------------------------------------------
+            if "stops" in data:
+                incoming_stops = data.get("stops", [])
+                incoming_orders = {s.get("stop_order") for s in incoming_stops}
+
+                existing_stops = {s.stop_order: s for s in route.stops.all()}
+
+                # ----- 2a) Delete stops that are no longer present -----
+                for order, stop in existing_stops.items():
+                    if order not in incoming_orders:
+                        try:
+                            stop.delete()
+                        except ProtectedError:
+                            return Response(
+                                {
+                                    "message": (
+                                        f"Cannot remove stop #{order} because "
+                                        "bookings already reference it."
+                                    )
+                                },
+                                status=status.HTTP_400_BAD_REQUEST,
+                            )
+
+                # ----- 2b) Update existing / create new stops -----
+                routes_ids = []
+                for stop in incoming_stops:
+                    obj, _ = HiaceRouteStop.objects.update_or_create(
+                        route=route,
+                        stop_order=stop.get("stop_order"),
+                        defaults={
+                            "city_id": stop.get("city"),
+                            "arrival_offset": convertStrToDuration(
+                                stop.get("arrival_offset")
+                            ),
+                            "departure_offset": convertStrToDuration(
+                                stop.get("departure_offset")
+                            ),
+                            "is_boarding": stop.get("is_boarding", True),
+                            "is_dropping": stop.get("is_dropping", True),
+                        },
+                    )
+                    routes_ids.append(obj.id)
+
+                # ----- 2c) Fares: update_or_create keyed on (from, to) -----
+                incoming_fare_pairs = set()
+                for index, fare in enumerate(data.get("fares", [])):
+                    if index + 1 >= len(routes_ids):
+                        break
+
+                    from_id = routes_ids[index]
+                    to_id = routes_ids[index + 1]
+                    incoming_fare_pairs.add((from_id, to_id))
+
+                    HiaceRouteFare.objects.update_or_create(
+                        route=route,
+                        from_stop_id=from_id,
+                        to_stop_id=to_id,
+                        defaults={"fare": fare.get("fare")},
+                    )
+
+                # ----- 2d) Delete stale fares (safe: no FK protection) -----
+                if incoming_fare_pairs:
+                    stale = HiaceRouteFare.objects.filter(route=route)
+                    for from_id, to_id in incoming_fare_pairs:
+                        stale = stale.exclude(
+                            from_stop_id=from_id, to_stop_id=to_id
+                        )
+                    stale.delete()
+
+            return Response(
+                {
+                    "message": "Route updated successfully.",
+                    "route_id": route.id,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            traceback.print_exc()
+            return Response(
+                {"message": str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+            
 
 class CreateHiaceScheduleView(views.APIView):
     """
@@ -869,6 +1002,8 @@ class CreateHiaceScheduleView(views.APIView):
 
         # Validate input
         serializer = CreateHiaceScheduleSerializer(data=request.data)
+
+        print("+++++++++++++++++++++++++++++++++++++++",request.data)
         if not serializer.is_valid():
             return Response(
                 {'errors': serializer.errors},
@@ -883,6 +1018,8 @@ class CreateHiaceScheduleView(views.APIView):
             vehicle = Hiace.objects.get(id=validated_data['vehicle'])
             
             # Check if route belongs to user
+            print("++++++++++++++++++++++++++routeOperator",route.operator)
+            print("++++++++++++++++++++++++++++++++user",user)
             if route.operator != user:
                 return Response(
                     {'error': 'You can only create schedules for your own routes.'},

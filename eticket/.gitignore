@@ -32,3 +32,13 @@ package.json
 
 # Django settings with secrets
 eticket/settings.py
+
+
+firebase
+
+firebase/service-account.json
+
+service-account.json
+
+service-account.json
+*.json

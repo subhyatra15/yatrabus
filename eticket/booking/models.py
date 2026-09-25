@@ -107,6 +107,7 @@ class Booking(models.Model):
         blank=True,
         null=True,
     )
+    departure_reminder_sent = models.BooleanField(default=False)
 
     class Meta:
         db_table = "booking"

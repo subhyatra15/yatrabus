@@ -97,7 +97,7 @@ class RouteStop(models.Model):
     
 # Route Fare
 class RouteFare(models.Model):
-    route = models.ForeignKey(Route, on_delete=models.CASCADE)
+    route = models.ForeignKey(Route, on_delete=models.CASCADE,related_name="fares")
 
     from_stop = models.ForeignKey(
         RouteStop,

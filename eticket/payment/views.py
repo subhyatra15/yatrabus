@@ -11,6 +11,10 @@ from hiace.models import HiaceBooking
 from .models import Payment, PaymentLog,HiacePayment
 
 from .serializers import PaymentSerializer
+from notification.services import (
+    send_user_notification,
+    send_user_email,
+)
 
 import hmac
 import hashlib
@@ -308,9 +312,10 @@ class EsewaInitiateViewHiace(views.APIView):
         )
     
 
-# Esewa Payment Verfiy 
 class EsewaVerifyView(views.APIView):
+
     def post(self, request):
+
         transaction_uuid = request.data.get("transaction_uuid")
 
         if not transaction_uuid:
@@ -326,27 +331,100 @@ class EsewaVerifyView(views.APIView):
         if not payment_obj:
             payment_obj = HiacePayment.objects.filter(
                 transaction_id=transaction_uuid
-                ).first()
+            ).first()
 
             if not payment_obj:
                 return Response(
-                        {"message": "Payment not found"},
-                        status=status.HTTP_404_NOT_FOUND
-                    )
+                    {"message": "Payment not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
         if payment_obj.status == "SUCCESS":
             return Response(
                 {
-                    "message": "Payment already verified",
-                    status:status.HTTP_404_NOT_FOUND
+                    "message": "Payment already verified"
                 },
                 status=status.HTTP_200_OK
             )
+
+        # ==========================================
+        # EXISTING PAYMENT LOGIC
+        # ==========================================
+
         payment_obj.status = "SUCCESS"
         payment_obj.save()
 
         booking = payment_obj.booking
+
         booking.booking_status = "PAID"
         booking.save()
+
+        # ==========================================
+        # NOTIFICATIONS
+        # ==========================================
+        # Notification errors must NOT affect
+        # successful payment verification.
+        # ==========================================
+
+        try:
+
+            is_hiace = isinstance(payment_obj, HiacePayment)
+
+            booking_type = "HIACE" if is_hiace else "BUS"
+
+            title = (
+                "Hiace Booking Confirmed"
+                if is_hiace
+                else "Bus Booking Confirmed"
+            )
+
+            vehicle_name = "Hiace" if is_hiace else "Bus"
+
+            body = (
+                f"Your {vehicle_name} booking has been confirmed. "
+                f"Booking: {booking.booking_number}"
+            )
+
+            # --------------------------------------
+            # Firebase Push Notification
+            # --------------------------------------
+
+            send_user_notification(
+                user=booking.customer,
+                title=title,
+                body=body,
+                data={
+                    "type": "BOOKING_CONFIRMED",
+                    "booking_type": booking_type,
+                    "booking_id": booking.id,
+                    "booking_number": booking.booking_number,
+                },
+            )
+
+            # --------------------------------------
+            # Email Notification
+            # --------------------------------------
+
+            send_user_email(
+                user=booking.customer,
+                subject=(
+                    f"{vehicle_name} Booking Confirmed - "
+                    f"{booking.booking_number}"
+                ),
+                message=(
+                    f"Dear "
+                    f"{booking.customer.get_full_name() or booking.customer.username},\n\n"
+                    f"Your {vehicle_name} booking has been "
+                    f"successfully confirmed.\n\n"
+                    f"Booking Number: {booking.booking_number}\n"
+                    f"Payment Status: PAID\n"
+                    f"Total Amount: NPR {booking.total_amount}\n\n"
+                    f"Thank you for using YatraBus."
+                ),
+            )
+
+        except Exception:
+            pass
 
         return Response(
             {
@@ -354,7 +432,6 @@ class EsewaVerifyView(views.APIView):
             },
             status=status.HTTP_200_OK
         )
-
 
 
 # Esewa Payment Verfiy  For Hiace

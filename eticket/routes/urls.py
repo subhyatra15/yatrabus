@@ -16,7 +16,8 @@ urlpatterns = [
     path("routes/popular/", PopularRouteView.as_view(), name="popular-routes"),
     path("routes/routestop/", RouteStopView.as_view(), name="routestop"),
     path("routes/priceperseat/", CalculatePriceView.as_view(), name="routestop"),
-    path("routes/create/", CreateBusRouteView.as_view(), name="route_create"),
+     path("routes/create/", CreateBusRouteView.as_view(), name="route_create"),
+    path("routes/create/<int:pk>/", CreateBusRouteView.as_view(), name="route_put"),
 
 ]
 

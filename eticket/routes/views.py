@@ -3,6 +3,8 @@ from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
+from django.db.models.deletion import ProtectedError
+
 
 from .models import Route, RouteStop, RouteFare
 from .serializers import RouteSerializer, RouteStopSerializer
@@ -10,7 +12,7 @@ from django.db.models import Count, Q, Prefetch
 from django.db import transaction
 import traceback
 from datetime import timedelta
-
+from bus.models import Bus
 
 
 def parse_duration(value):
@@ -156,10 +158,6 @@ class BusRouteViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='priceperseat')
     def get_price_per_seat(self, request):
-        """
-        Get price per seat between two stops
-        Query params: route, boardingstop, droppingstop
-        """
         route_id = request.query_params.get('route')
         boarding_stop_id = request.query_params.get('boardingstop')
         dropping_stop_id = request.query_params.get('droppingstop')
@@ -420,5 +418,147 @@ class CreateBusRouteView(views.APIView):
                 {
                     "message": str(e),
                 },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    @transaction.atomic
+    def put(self, request, pk):
+        user = request.user
+
+        if user.role != "D":
+            return Response(
+                {"message": "User must be an operator."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        route = Route.objects.filter(id=pk).first()
+        if not route:
+            return Response(
+                {"message": "Route not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        data = request.data
+
+        try:
+            # -------- 1) scalar updates --------
+            if data.get("vehicle") is not None:
+                bus = Bus.objects.filter(id=data.get("vehicle")).first()
+                if not bus:
+                    return Response(
+                        {"message": "Bus not found."},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+                route.bus = bus
+
+            if data.get("source_city") is not None:
+                route.source_city_id = data.get("source_city")
+            if data.get("destination_city") is not None:
+                route.destination_city_id = data.get("destination_city")
+            if data.get("distance") is not None:
+                route.distance = data.get("distance")
+            if data.get("duration") is not None:
+                route.duration = parse_duration(data.get("duration"))
+
+            route.save()
+
+            # -------- 2) stops + fares --------
+            if "stops" in data:
+                incoming_stops = data.get("stops", [])
+                incoming_orders = {s.get("stop_order") for s in incoming_stops}
+
+                # Fetch existing stops for this route
+                existing_by_order = {s.stop_order: s for s in route.stops.all()}
+
+                # Map: the client's "stop_order" -> the actual RouteStop object
+                # and also let client use DB ids if it wants to
+                stops_by_order = {}
+                stops_by_id = {}
+
+                # 2a) delete stops no longer present
+                for order, stop in existing_by_order.items():
+                    if order not in incoming_orders:
+                        try:
+                            stop.delete()
+                        except ProtectedError:
+                            return Response(
+                                {
+                                    "message": (
+                                        f"Cannot remove stop #{order} because "
+                                        "bookings already reference it."
+                                    )
+                                },
+                                status=status.HTTP_400_BAD_REQUEST,
+                            )
+
+                # 2b) update_or_create stops, then build lookup maps
+                for stop in incoming_stops:
+                    obj, _ = RouteStop.objects.update_or_create(
+                        route=route,
+                        stop_order=stop.get("stop_order"),
+                        defaults={
+                            "city_id": stop.get("city"),
+                            "arrival_offset": parse_duration(stop.get("arrival_offset")),
+                            "departure_offset": parse_duration(stop.get("departure_offset")),
+                            "is_boarding": stop.get("is_boarding", True),
+                            "is_dropping": stop.get("is_dropping", True),
+                        },
+                    )
+                    stops_by_order[obj.stop_order] = obj
+                    stops_by_id[obj.id] = obj
+
+                # 2c) update_or_create fares
+                incoming_fare_pairs = set()
+                for fare in data.get("fares", []):
+                    from_ref = fare.get("from_stop")
+                    to_ref = fare.get("to_stop")
+
+                    # Accept either stop_order or DB id — resolve to a RouteStop
+                    from_stop = (
+                        stops_by_order.get(from_ref)
+                        or stops_by_id.get(from_ref)
+                        or RouteStop.objects.filter(route=route, id=from_ref).first()
+                    )
+                    to_stop = (
+                        stops_by_order.get(to_ref)
+                        or stops_by_id.get(to_ref)
+                        or RouteStop.objects.filter(route=route, id=to_ref).first()
+                    )
+
+                    if from_stop is None:
+                        raise ValueError(f"Invalid from_stop: {from_ref}")
+                    if to_stop is None:
+                        raise ValueError(f"Invalid to_stop: {to_ref}")
+
+                    incoming_fare_pairs.add((from_stop.id, to_stop.id))
+
+                    RouteFare.objects.update_or_create(
+                        route=route,
+                        from_stop=from_stop,
+                        to_stop=to_stop,
+                        defaults={"fare": fare.get("fare")},
+                    )
+
+                # 2d) delete stale fares
+                if incoming_fare_pairs:
+                    stale = RouteFare.objects.filter(route=route)
+                    for from_id, to_id in incoming_fare_pairs:
+                        stale = stale.exclude(
+                            from_stop_id=from_id,
+                            to_stop_id=to_id,
+                        )
+                    stale.delete()
+
+            return Response(
+                {
+                    "message": "Route updated successfully.",
+                    "route_id": route.id,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            traceback.print_exc()
+            return Response(
+                {"message": str(e)},
                 status=status.HTTP_400_BAD_REQUEST,
             )

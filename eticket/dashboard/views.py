@@ -9,6 +9,9 @@ from rest_framework.decorators import api_view, permission_classes
 import logging
 logger = logging.getLogger(__name__)
 
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from rest_framework.views import APIView
+
 from bus.models import Bus
 from routes.models import Route, RouteStop
 from schedule.models import Schedule
@@ -522,9 +525,6 @@ class DriverTripDetailView(views.APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-    # ------------------------------------------------------------------ #
-    #  Response builders
-    # ------------------------------------------------------------------ #
 
     def build_bus_trip_response(self, schedule, user):
         route = schedule.route
@@ -855,12 +855,17 @@ class DriverVehiclesView(views.APIView):
             )
 
 
-class DriverProfileView(views.APIView): 
+class DriverProfileView(APIView):
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    # ------------------------------------------------------------------
+    # GET — profile + stats
+    # ------------------------------------------------------------------
     def get(self, request):
         user = request.user
         now = timezone.now()
-        
+
         if user.role != 'D':
             return Response(
                 {'error': 'Access denied. Only drivers can access this endpoint.'},
@@ -868,21 +873,26 @@ class DriverProfileView(views.APIView):
             )
 
         try:
-            # Get stats
-            buses = Bus.objects.filter(operator=user)
-            hiaces = Hiace.objects.filter(operator=user)
-            
-            # Total trips
+            buses = Bus.objects.filter(operator=user, status='ACTIVE')
+            hiaces = Hiace.objects.filter(operator=user, status='ACTIVE')
+
+            bus_routes = Route.objects.filter(operator=user, status='ACTIVE')
+            hiace_routes = HiaceRoute.objects.filter(operator=user, status='ACTIVE')
+
             bus_trips = Schedule.objects.filter(
                 route__bus__in=buses,
                 arrival_datetime__lt=now,
                 status="ACTIVE",
             ).count()
-            
-            hiace_trips = HiaceSchedule.objects.filter(route__hiace__in=hiaces,arrival_datetime__lt=now ,status='ACTIVE').count()
+
+            hiace_trips = HiaceSchedule.objects.filter(
+                route__in=hiace_routes,
+                arrival_datetime__lt=now,
+                status='ACTIVE',
+            ).count()
+
             total_trips = bus_trips + hiace_trips
-            
-            # Total earnings
+
             bus_result = Booking.objects.filter(
                 schedule__route__bus__in=buses,
                 booking_status="PAID",
@@ -896,9 +906,8 @@ class DriverProfileView(views.APIView):
                 - (bus_result["platform_amount"] or 0)
             )
 
-            # Hiace earnings
             hiace_result = HiaceBooking.objects.filter(
-                schedule__route__hiace__in=hiaces,
+                schedule__route__in=hiace_routes,
                 booking_status="PAID",
             ).aggregate(
                 total_amount=Sum("total_amount"),
@@ -909,17 +918,24 @@ class DriverProfileView(views.APIView):
                 (hiace_result["total_amount"] or 0)
                 - (hiace_result["platform_amount"] or 0)
             )
-            
+
             total_earnings = float(bus_earnings) + float(hiace_earnings)
-            
-            # Get vehicle types
+
+            # Vehicle types
             vehicle_types = []
             for bus in buses:
-                if bus.bus_type not in vehicle_types:
+                if bus.bus_type and bus.bus_type not in vehicle_types:
                     vehicle_types.append(bus.bus_type)
             for hiace in hiaces:
-                if hiace.hiace_type not in vehicle_types:
+                if hiace.hiace_type and hiace.hiace_type not in vehicle_types:
                     vehicle_types.append(hiace.hiace_type)
+
+            image_url = None
+            if getattr(user, 'image', None):
+                try:
+                    image_url = request.build_absolute_uri(user.image.url)
+                except Exception:
+                    image_url = None
 
             profile_data = {
                 'id': user.id,
@@ -927,15 +943,16 @@ class DriverProfileView(views.APIView):
                 'email': user.email,
                 'phone': getattr(user, 'phone', 'N/A'),
                 'role': user.role,
-                'profileImage': getattr(user, 'profile_image', None),
+                'image': image_url,
                 'licenseNumber': getattr(user, 'license_number', None),
                 'licenseExpiry': getattr(user, 'license_expiry', None),
                 'experience': getattr(user, 'experience', 0),
-                'rating': 4.6,  # Placeholder
+                'rating': 4.6,  # placeholder until you have real ratings
                 'totalTrips': total_trips,
                 'totalEarnings': round(total_earnings, 2),
                 'totalVehicle': len(buses) + len(hiaces),
-                'joinDate': user.date_joined.isoformat() if hasattr(user, 'date_joined') else None,
+                'joinDate': user.date_joined.isoformat()
+                    if hasattr(user, 'date_joined') else None,
                 'vehicleType': vehicle_types,
                 'languages': getattr(user, 'languages', ['Nepali', 'English']),
                 'bio': getattr(user, 'bio', None),
@@ -944,7 +961,7 @@ class DriverProfileView(views.APIView):
                     'name': getattr(user, 'emergency_name', None),
                     'phone': getattr(user, 'emergency_phone', None),
                     'relationship': getattr(user, 'emergency_relationship', None),
-                } if hasattr(user, 'emergency_name') else None,
+                } if getattr(user, 'emergency_name', None) else None,
             }
 
             return Response(profile_data, status=status.HTTP_200_OK)
@@ -957,7 +974,7 @@ class DriverProfileView(views.APIView):
 
     def put(self, request):
         user = request.user
-        
+
         if user.role != 'D':
             return Response(
                 {'error': 'Access denied. Only drivers can access this endpoint.'},
@@ -965,17 +982,43 @@ class DriverProfileView(views.APIView):
             )
 
         try:
-            # Update user fields
             fields = ['fullName', 'phone', 'address', 'bio', 'experience']
             for field in fields:
                 if field in request.data:
-                    setattr(user, field, request.data[field])
-            
+                    value = request.data[field]
+
+                    if isinstance(value, str) and value.strip() == "":
+                        if field != 'experience':
+                            value = None
+
+                    if field == 'experience' and value is not None:
+                        try:
+                            value = int(value)
+                        except (TypeError, ValueError):
+                            value = 0
+
+                    setattr(user, field, value)
+
+
+            image = request.FILES.get('image')
+            if image:
+                user.image = image
+
             user.save()
-            
+
+            image_url = None
+            if getattr(user, 'image', None):
+                try:
+                    image_url = request.build_absolute_uri(user.image.url)
+                except Exception:
+                    image_url = None
+
             return Response(
-                {'message': 'Profile updated successfully'},
-                status=status.HTTP_200_OK
+                {
+                    'message': 'Profile updated successfully',
+                    'image': image_url,
+                },
+                status=status.HTTP_200_OK,
             )
 
         except Exception as e:
