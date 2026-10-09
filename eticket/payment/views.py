@@ -587,9 +587,287 @@ class KhaltiVerifyView(views.APIView):
         booking.booking_status = "PAID"
         booking.save()
 
+        try:
+            is_hiace = isinstance(payment_obj, HiacePayment)
+
+            booking_type = "HIACE" if is_hiace else "BUS"
+
+            title = (
+                "Hiace Booking Confirmed"
+                if is_hiace
+                else "Bus Booking Confirmed"
+            )
+
+            vehicle_name = "Hiace" if is_hiace else "Bus"
+
+            body = (
+                f"Your {vehicle_name} booking has been confirmed. "
+                f"Booking: {booking.booking_number}"
+            )
+
+            # --------------------------------------
+            # Firebase Push Notification
+            # --------------------------------------
+
+            send_user_notification(
+                user=booking.customer,
+                title=title,
+                body=body,
+                data={
+                    "type": "BOOKING_CONFIRMED",
+                    "booking_type": booking_type,
+                    "booking_id": booking.id,
+                    "booking_number": booking.booking_number,
+                },
+            )
+
+            # --------------------------------------
+            # Email Notification
+            # --------------------------------------
+
+            send_user_email(
+                user=booking.customer,
+                subject=(
+                    f"{vehicle_name} Booking Confirmed - "
+                    f"{booking.booking_number}"
+                ),
+                message=(
+                    f"Dear "
+                    f"{booking.customer.get_full_name() or booking.customer.username},\n\n"
+                    f"Your {vehicle_name} booking has been "
+                    f"successfully confirmed.\n\n"
+                    f"Booking Number: {booking.booking_number}\n"
+                    f"Payment Status: PAID\n"
+                    f"Total Amount: NPR {booking.total_amount}\n\n"
+                    f"Thank you for using YatraBus."
+                ),
+            )
+
+        except Exception:
+            pass
+
         return Response(
             {
                 "message": "Payment verified successfully"
             },
+            status=status.HTTP_200_OK
+        )
+
+
+
+# Khalti Initiate View for Hiace
+class khaltiInitiateViewHiace(views.APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self,request):
+        booking_id = request.data.get("booking_id")
+        if not booking_id:
+            return Response(
+                {
+                    'message':'Booking Id is required',
+                    'status' : status.HTTP_400_BAD_REQUEST
+                }
+            )
+        
+        try:
+            booking = HiaceBooking.objects.get(
+                id=booking_id,
+                customer=request.user
+            )
+        except Booking.DoesNotExist:
+            return Response(
+                {"error": "Booking not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if booking.booking_status != "PENDING":
+            return Response(
+                {"error": "Only pending bookings can be paid."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        payment, created = HiacePayment.objects.update_or_create(
+            booking=booking,
+            payment_method="KHALTI",
+            defaults={
+                "customer": request.user,
+                "amount": booking.total_amount,
+                "status": "PENDING",
+                "gateway": "KHALTI",
+            }
+        )
+        
+        url = settings.KHALTI_INITIATE_URL
+
+        payload = json.dumps({
+            "return_url": settings.RETURN_URL,
+            "website_url": settings.WEBSITE_URL,
+            "amount": int(payment.amount * 100),
+            "purchase_order_id": booking.booking_number,
+            "purchase_order_name": "Hiace Ticket",
+            "customer_info": {
+            "name": request.user.fullName,
+            "email": request.user.email,
+            "phone": request.user.phone
+            }
+        })
+        headers = {
+            'Authorization': f'Key {settings.KHALTI_SECRET_KEY}',
+            'Content-Type': 'application/json',
+        }
+
+        response = requests.request("POST", url, headers=headers, data=payload)
+        data = response.json()
+
+        print(response.status_code)
+        print(response.text)
+
+        if response.status_code != 200:
+            return Response(
+                {
+                    "message": "Khalti initiation failed",
+                    "error": data
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        payment.transaction_id = data.get("pidx")
+        payment.save()
+
+        return Response(
+            {
+                "message": "Successfully Initiated Khalti",
+                "payment_url": data.get("payment_url"),
+                "pidx": data.get("pidx")
+            },
+            status=status.HTTP_201_CREATED
+        )
+
+
+# Khalti Payment Verfiy For Hiace
+# ==========================================
+# KHALTI VERIFY PAYMENT
+# ==========================================
+class KhaltiVerifyView(views.APIView):
+
+    def post(self, request):
+
+        transaction_uuid = request.data.get("transaction_uuid")
+        print("+++++++++++++++++++++++++++++++",transaction_uuid)
+
+        if not transaction_uuid:
+            return Response(
+                {"message": "Transaction UUID is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # --------------------------------------
+        # Find payment (Bus first, then Hiace)
+        # --------------------------------------
+        payment_obj = Payment.objects.filter(
+            transaction_id=transaction_uuid
+        ).first()
+
+        if not payment_obj:
+            payment_obj = HiacePayment.objects.filter(
+                transaction_id=transaction_uuid
+            ).first()
+
+            if not payment_obj:
+                return Response(
+                    {"message": "Payment not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+        # --------------------------------------
+        # Idempotency — already verified
+        # --------------------------------------
+        if payment_obj.status == "SUCCESS":
+            return Response(
+                {"message": "Payment already verified"},
+                status=status.HTTP_200_OK
+            )
+
+        # ==========================================
+        # EXISTING PAYMENT LOGIC
+        # ==========================================
+
+        payment_obj.status = "SUCCESS"
+        payment_obj.save()
+
+        booking = payment_obj.booking
+
+        booking.booking_status = "PAID"
+        booking.save()
+
+        # ==========================================
+        # NOTIFICATIONS
+        # ==========================================
+        # Notification errors must NOT affect
+        # successful payment verification.
+        # ==========================================
+
+        try:
+
+            is_hiace = isinstance(payment_obj, HiacePayment)
+
+            booking_type = "HIACE" if is_hiace else "BUS"
+
+            title = (
+                "Hiace Booking Confirmed"
+                if is_hiace
+                else "Bus Booking Confirmed"
+            )
+
+            vehicle_name = "Hiace" if is_hiace else "Bus"
+
+            body = (
+                f"Your {vehicle_name} booking has been confirmed. "
+                f"Booking: {booking.booking_number}"
+            )
+
+            # --------------------------------------
+            # Firebase Push Notification
+            # --------------------------------------
+
+            send_user_notification(
+                user=booking.customer,
+                title=title,
+                body=body,
+                data={
+                    "type": "BOOKING_CONFIRMED",
+                    "booking_type": booking_type,
+                    "booking_id": booking.id,
+                    "booking_number": booking.booking_number,
+                },
+            )
+
+            # --------------------------------------
+            # Email Notification
+            # --------------------------------------
+
+            send_user_email(
+                user=booking.customer,
+                subject=(
+                    f"{vehicle_name} Booking Confirmed - "
+                    f"{booking.booking_number}"
+                ),
+                message=(
+                    f"Dear "
+                    f"{booking.customer.get_full_name() or booking.customer.username},\n\n"
+                    f"Your {vehicle_name} booking has been "
+                    f"successfully confirmed.\n\n"
+                    f"Booking Number: {booking.booking_number}\n"
+                    f"Payment Status: PAID\n"
+                    f"Total Amount: NPR {booking.total_amount}\n\n"
+                    f"Thank you for using YatraBus."
+                ),
+            )
+
+        except Exception:
+            pass
+
+        return Response(
+            {"message": "Payment verified successfully"},
             status=status.HTTP_200_OK
         )

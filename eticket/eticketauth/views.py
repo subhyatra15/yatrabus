@@ -7,6 +7,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
 from .serializers import RegisterSerializer
+from rest_framework.decorators import action
 
 
 User = get_user_model()
@@ -15,7 +16,29 @@ class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all().order_by("-date_joined")
     serializer_class = UserSerializer
     permission_classes = [permissions.IsAuthenticated]
-    # permission_classes = [AllowAny]
+    @action(
+        detail=False,
+        methods=["get", "put", "patch"],
+        url_path="me",
+        url_name="me",
+    )
+    def me(self, request):
+        user = request.user
+
+        if request.method == "GET":
+            serializer = self.get_serializer(user)
+            return Response(serializer.data)
+
+        # PUT or PATCH
+        partial = request.method == "PATCH"
+        serializer = self.get_serializer(
+            user,
+            data=request.data,
+            partial=partial,
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 
@@ -56,6 +79,7 @@ class PhoneLoginView(TokenObtainPairView):
 
 
 
+
 class VerifyTokenView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -63,6 +87,13 @@ class VerifyTokenView(views.APIView):
         user = request.user
 
         refresh = RefreshToken.for_user(user)
+
+        image_url = None
+        if user.image and user.image.name:
+            try:
+                image_url = user.image.url
+            except (ValueError, AttributeError):
+                image_url = None
 
         return Response({
             "success": True,
@@ -74,16 +105,28 @@ class VerifyTokenView(views.APIView):
                 "phone": user.phone,
                 "email": user.email,
                 "role": user.role,
+                "image": image_url,
+                "address": user.address,
+                "emergency_contact": user.emergency_contact,
+                "emergency_name": user.emergency_name,
             }
         })
 
 
-# Auth Me
+# auth me
 class AuthMeView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         user = request.user
+
+        image_url = None
+        if user.image and user.image.name:
+            try:
+                image_url = user.image.url
+            except (ValueError, AttributeError):
+                image_url = None
+
         return Response({
             "success": True,
             "user": {
@@ -92,5 +135,9 @@ class AuthMeView(views.APIView):
                 "phone": user.phone,
                 "email": user.email,
                 "role": user.role,
+                "image": image_url,
+                "address": user.address,
+                "emergency_contact": user.emergency_contact,
+                "emergency_name": user.emergency_name,
             }
         })

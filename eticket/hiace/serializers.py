@@ -21,6 +21,7 @@ class HiaceSerializer(serializers.ModelSerializer):
             "hiace_name",
             "hiace_number",
             "hiace_type",
+            "hiaceimage",
             "total_seats",
             "seat_layout",
             "wifi",
@@ -214,6 +215,7 @@ class HiaceScheduleSerializer(serializers.ModelSerializer):
     available_seats = serializers.SerializerMethodField()
     hiace_name = serializers.CharField(source="route.hiace.hiace_name", read_only=True)
     hiace_number = serializers.CharField(source="route.hiace.hiace_number", read_only=True)
+    hiace_image = serializers.CharField(source="route.hiace.hiaceimage", read_only=True)
     hiace_type = serializers.CharField(source="route.hiace.hiace_type", read_only=True)
     total_seats = serializers.IntegerField(source="route.hiace.total_seats", read_only=True)
     source_city = serializers.CharField(source="route.source_city.name", read_only=True)
@@ -237,6 +239,7 @@ class HiaceScheduleSerializer(serializers.ModelSerializer):
             "hiace_name",
             "hiace_number",
             "hiace_type",
+            "hiace_image",
             "total_seats",
             "source_city",
             "destination_city",

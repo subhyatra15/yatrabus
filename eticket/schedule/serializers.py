@@ -27,6 +27,11 @@ class ScheduleSerializer(serializers.ModelSerializer):
         read_only=True
     )
 
+    operator_image = serializers.CharField(
+            source="route.bus.operator.image",
+            read_only=True
+        )
+
     bus_name = serializers.CharField(
         source="route.bus.bus_name",
         read_only=True
@@ -36,6 +41,11 @@ class ScheduleSerializer(serializers.ModelSerializer):
         source="route.bus.bus_number",
         read_only=True
     )
+
+    bus_image = serializers.CharField(
+            source="route.bus.busimage",
+            read_only=True
+        )
 
     bus_type = serializers.CharField(
         source="route.bus.bus_type",
@@ -94,8 +104,10 @@ class ScheduleSerializer(serializers.ModelSerializer):
             "operator",
             "operator_name",
             "operator_phone",
+            "operator_image",
             "bus_name",
             "bus_number",
+            "bus_image",
             "bus_type",
             "total_seats",
             "seat_layout",

@@ -24,6 +24,7 @@ debugpy==1.8.21
 Django==6.0.7
 django-cors-headers==4.9.0
 django-filter==26.1
+django-unfold==0.108.0
 djangorestframework==3.17.1
 djangorestframework_simplejwt==5.5.1
 firebase_admin==7.6.0

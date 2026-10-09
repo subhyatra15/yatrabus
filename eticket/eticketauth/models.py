@@ -18,7 +18,23 @@ class User(AbstractUser):
     null=True,
     blank=True
 )
+    emergency_contact = models.CharField(
+        max_length=15,
+        null=True,
+        blank=True
+    )
+    emergency_name = models.CharField(
+            max_length=255,
+            null=True,
+            blank=True
+        )
+    address = models.CharField(
+                max_length=255,
+                null=True,
+                blank=True
+            )
 
+  
     USERNAME_FIELD = "phone"
     REQUIRED_FIELDS = []
 

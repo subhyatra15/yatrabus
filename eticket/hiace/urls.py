@@ -10,7 +10,8 @@ from .views import (
     CreateHiaceScheduleView,
     SelectSeatView,
     ReleaseSeatView,
-    SelectedSeatsView
+    SelectedSeatsView,
+    RecommendedHiaceView
 )
 
 router = DefaultRouter()
@@ -20,6 +21,7 @@ router.register(r'hiace-schedules', HiaceScheduleViewSet, basename='hiace-schedu
 router.register(r'hiace-routes', HiaceRouteViewSet, basename='hiace-route')
 
 urlpatterns = [
+    path("hiace/recommended/", RecommendedHiaceView.as_view(), name="recommended-hiace"),
     path(
     'hiace-seats/',
     SeatViewSet.as_view({
@@ -28,6 +30,16 @@ urlpatterns = [
     }),
     name='hiace-seats'
     ),
+    path(
+    'hiace-seats/<int:pk>/',
+    SeatViewSet.as_view({
+        'get': 'retrieve',
+        'put': 'update',
+        'patch': 'partial_update',
+        'delete': 'destroy',
+    }),
+    name='hiace-seat-detail'
+),
     path(
         "hiace-routes/create/",
             CreateHiaceRouteView.as_view(),

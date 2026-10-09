@@ -4,11 +4,48 @@ from django.contrib.auth import get_user_model
 
 User = get_user_model()
 
-
 class UserSerializer(serializers.ModelSerializer):
+    image = serializers.SerializerMethodField()
+    fullName = serializers.CharField(
+        source="full_name",
+        required=False,
+        allow_blank=True,
+    )
+    emergencyContact = serializers.CharField(
+        source="emergency_contact",
+        required=False,
+        allow_blank=True,
+    )
+    emergencyName = serializers.CharField(
+        source="emergency_name",
+        required=False,
+        allow_blank=True,
+    )
+
     class Meta:
         model = User
-        fields = "__all__"
+        fields = [
+            "id",
+            "email",
+            "fullName",
+            "phone",
+            "address",
+            "image",
+            "emergencyContact",
+            "emergencyName",
+            "role",
+            "date_joined",
+        ]
+        read_only_fields = ["id", "email", "role", "date_joined"]
+
+    def get_image(self, obj):
+        image = obj.image
+        if not image or not image.name:
+            return None
+        try:
+            return image.url
+        except (ValueError, AttributeError):
+            return None
 
 
 

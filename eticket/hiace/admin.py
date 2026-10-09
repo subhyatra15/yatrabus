@@ -349,12 +349,14 @@ class HiaceBookingAdmin(admin.ModelAdmin):
         'created_at',
         'expired_at',
     ]
+
     list_filter = [
         'booking_status',
         'schedule',
         'created_at',
         'expired_at',
     ]
+
     search_fields = [
         'booking_number',
         'customer__email',
@@ -362,28 +364,39 @@ class HiaceBookingAdmin(admin.ModelAdmin):
         'schedule__route__source_city__name',
         'schedule__route__destination_city__name',
     ]
+
     readonly_fields = [
         'booking_number',
         'created_at',
         'qr_code_preview',
         'qr_token_display',
     ]
-    raw_id_fields = ['customer', 'schedule', 'boarding_stop', 'dropping_stop']
+
+    raw_id_fields = [
+        'customer',
+        'schedule',
+        'boarding_stop',
+        'dropping_stop',
+    ]
+
     inlines = [HiaceBookingSeatInline]
+
     fieldsets = (
         ('Booking Information', {
             'fields': (
                 'booking_number',
                 'customer',
-                'schedule'
+                'schedule',
             )
         }),
+
         ('Stops', {
             'fields': (
                 'boarding_stop',
                 'dropping_stop',
             )
         }),
+
         ('Payment Information', {
             'fields': (
                 'subtotal',
@@ -393,15 +406,16 @@ class HiaceBookingAdmin(admin.ModelAdmin):
                 'total_amount',
             )
         }),
+
         ('Status', {
             'fields': (
                 'booking_status',
                 'qr_code',
                 'qr_code_preview',
-                'qr_token',
-                'qr_token_display',
+                'qr_token_display', 
             )
         }),
+
         ('Timestamps', {
             'fields': (
                 'created_at',
@@ -410,6 +424,7 @@ class HiaceBookingAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
     )
+
     actions = [
         'mark_as_paid',
         'mark_as_completed',

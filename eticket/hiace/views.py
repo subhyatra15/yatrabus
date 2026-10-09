@@ -2,7 +2,7 @@ from decimal import Decimal
 import uuid
 
 from django.db import transaction
-from django.db.models import Q, Count
+from django.db.models import Count,Q,Prefetch
 from rest_framework import status, viewsets, filters, views
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied
@@ -1002,8 +1002,6 @@ class CreateHiaceScheduleView(views.APIView):
 
         # Validate input
         serializer = CreateHiaceScheduleSerializer(data=request.data)
-
-        print("+++++++++++++++++++++++++++++++++++++++",request.data)
         if not serializer.is_valid():
             return Response(
                 {'errors': serializer.errors},
@@ -1016,10 +1014,7 @@ class CreateHiaceScheduleView(views.APIView):
             # Get route and vehicle
             route = HiaceRoute.objects.get(id=validated_data['route'])
             vehicle = Hiace.objects.get(id=validated_data['vehicle'])
-            
-            # Check if route belongs to user
-            print("++++++++++++++++++++++++++routeOperator",route.operator)
-            print("++++++++++++++++++++++++++++++++user",user)
+        
             if route.operator != user:
                 return Response(
                     {'error': 'You can only create schedules for your own routes.'},
@@ -1300,3 +1295,69 @@ class SelectedSeatsView(APIView):
             })
 
         return Response(selected)
+
+
+# RecommendedBusesView
+class RecommendedHiaceView(views.APIView):
+    def get(self, request):
+        source_city_id = request.query_params.get('source_city')
+        destination_city_id = request.query_params.get('destination_city')
+        
+        # Base queryset
+        hiaces = Hiace.objects.filter(status="ACTIVE")
+        
+        # If source and destination are provided, filter buses that have routes for these cities
+        if source_city_id and destination_city_id:
+            hiaces = hiaces.filter(
+                hiace_routes__source_city_id=source_city_id,
+                hiace_routes__destination_city_id=destination_city_id,
+                hiace_routes__status="ACTIVE"
+            )
+        
+        # Get recommended vehicles based on booking count
+        recommended_hiace = (
+            hiaces
+            .select_related('operator')
+            .prefetch_related(
+                Prefetch(
+                    'hiace_routes',
+                    queryset=HiaceRoute.objects.filter(status="ACTIVE")
+                    .select_related('source_city', 'destination_city')
+                    .prefetch_related(
+                        Prefetch('stops', queryset=HiaceRouteStop.objects.select_related('city')),
+                        Prefetch('fares', queryset=HiaceRouteFare.objects.select_related('from_stop', 'to_stop'))
+                    )
+                )
+            )
+            .annotate(
+                total_bookings=Count(
+                    "hiace_routes__hiace_schedules__hiace_bookings",
+                    filter=Q(
+                        hiace_routes__hiace_schedules__hiace_bookings__booking_status="PAID"
+                    ),
+                    distinct=True,
+                )
+            )
+            .filter(total_bookings__gt=0)
+            .order_by("-total_bookings")[:10]
+        )
+
+        if not recommended_hiace:
+            return Response(
+                {"message": "No recommended buses found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Serialize the Hiaces with context
+        context = {
+            'source_city_id': source_city_id,
+            'destination_city_id': destination_city_id,
+            'request': request
+        }
+        serializer = HiaceSerializer(recommended_hiace, many=True, context=context)
+        
+        return Response({
+            "message": "Successfully fetched recommended buses",
+            "count": len(serializer.data),
+            "results": serializer.data
+        })

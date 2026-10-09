@@ -67,14 +67,11 @@ class BusViewSet(viewsets.ModelViewSet):
 # RecommendedBusesView
 class RecommendedBusesView(views.APIView):
     def get(self, request):
-        # Get source and destination from query parameters (optional)
         source_city_id = request.query_params.get('source_city')
         destination_city_id = request.query_params.get('destination_city')
         
-        # Base queryset
         buses = Bus.objects.filter(status="ACTIVE")
         
-        # If source and destination are provided, filter buses that have routes for these cities
         if source_city_id and destination_city_id:
             buses = buses.filter(
                 routes__source_city_id=source_city_id,
@@ -82,7 +79,6 @@ class RecommendedBusesView(views.APIView):
                 routes__status="ACTIVE"
             )
         
-        # Get recommended buses based on booking count
         recommended_buses = (
             buses
             .select_related('operator')
@@ -93,7 +89,7 @@ class RecommendedBusesView(views.APIView):
                     .select_related('source_city', 'destination_city')
                     .prefetch_related(
                         Prefetch('stops', queryset=RouteStop.objects.select_related('city')),
-                        Prefetch('routefare_set', queryset=RouteFare.objects.select_related('from_stop', 'to_stop'))
+                        Prefetch('fares', queryset=RouteFare.objects.select_related('from_stop', 'to_stop'))
                     )
                 )
             )
@@ -115,7 +111,6 @@ class RecommendedBusesView(views.APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # Serialize the buses with context
         context = {
             'source_city_id': source_city_id,
             'destination_city_id': destination_city_id,
