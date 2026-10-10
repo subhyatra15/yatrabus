@@ -8,6 +8,7 @@ from .services import (
     send_user_email,
 )
 
+
 @shared_task
 def send_departure_reminders():
 
@@ -19,27 +20,19 @@ def send_departure_reminders():
     reminder_start = now + timedelta(minutes=29)
     reminder_end = now + timedelta(minutes=31)
 
-    # ==========================================
-    # BUS
-    # ==========================================
-
     bus_bookings = Booking.objects.select_related(
         "customer",
         "schedule",
     ).filter(
         booking_status="PAID",
         departure_reminder_sent=False,
-        schedule__departure_time__gte=reminder_start,
-        schedule__departure_time__lt=reminder_end,
+        schedule__departure_datetime__gte=reminder_start,
+        schedule__departure_datetime__lt=reminder_end,
     )
 
     for booking in bus_bookings:
 
-        departure_time = booking.schedule.departure_time
-
-        # ------------------------------------------
-        # PUSH NOTIFICATION
-        # ------------------------------------------
+        departure_time = booking.schedule.departure_datetime
 
         send_user_notification(
             user=booking.customer,
@@ -58,9 +51,6 @@ def send_departure_reminders():
             },
         )
 
-        # ------------------------------------------
-        # EMAIL
-        # ------------------------------------------
 
         send_user_email(
             user=booking.customer,
@@ -86,9 +76,6 @@ def send_departure_reminders():
             update_fields=["departure_reminder_sent"]
         )
 
-    # ==========================================
-    # HIACE
-    # ==========================================
 
     hiace_bookings = HiaceBooking.objects.select_related(
         "customer",
@@ -96,13 +83,13 @@ def send_departure_reminders():
     ).filter(
         booking_status="PAID",
         departure_reminder_sent=False,
-        schedule__departure_time__gte=reminder_start,
-        schedule__departure_time__lt=reminder_end,
+        schedule__departure_datetime__gte=reminder_start,
+        schedule__departure_datetime__lt=reminder_end,
     )
 
     for booking in hiace_bookings:
 
-        departure_time = booking.schedule.departure_time
+        departure_time = booking.schedule.departure_datetime
 
         # ------------------------------------------
         # PUSH NOTIFICATION
