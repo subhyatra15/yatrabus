@@ -1,5 +1,11 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework import serializers
+
+
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
+from django.conf import settings
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
@@ -177,3 +183,53 @@ class PhoneTokenObtainPairSerializer(TokenObtainPairSerializer):
 #                 "role": user.role,
 #             },
 #         }
+
+
+
+class GoogleAuthSerializer(serializers.Serializer):
+    id_token = serializers.CharField()
+    role = serializers.ChoiceField(choices=['P', 'D'], required=False, default='P')
+
+    def validate_id_token(self, value):
+        try:
+            info = id_token.verify_oauth2_token(
+                value,
+                google_requests.Request(),
+                settings.GOOGLE_CLIENT_ID,
+            )
+        except Exception as e:
+            raise serializers.ValidationError(f"Invalid Google token: {str(e)}")
+
+        if not info.get("email_verified"):
+            raise serializers.ValidationError("Google email not verified.")
+
+        self.google_info = info
+        return value
+
+    def create(self, validated_data):
+        info = self.google_info
+        email = info["email"]
+        google_id = info["sub"]
+        full_name = info.get("name", "")
+        picture = info.get("picture")
+
+        user = User.objects.filter(email=email).first()
+
+        if user is None:
+            user = User.objects.create(
+                email=email,
+                fullName=full_name,
+                phone=f"g_{google_id[:13]}",  
+                google_id=google_id,
+                role=validated_data.get("role", "P"),
+            )
+            user.set_unusable_password()
+            user.save()
+        else:
+            if not user.google_id:
+                user.google_id = google_id
+                if not user.fullName and full_name:
+                    user.fullName = full_name
+                user.save()
+
+        return user, picture

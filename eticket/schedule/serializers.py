@@ -134,8 +134,18 @@ class ScheduleSerializer(serializers.ModelSerializer):
         )
 
     def validate(self, attrs):
+        instance = getattr(self, "instance", None)
 
-        if attrs["arrival_datetime"] <= attrs["departure_datetime"]:
+        departure = attrs.get(
+            "departure_datetime",
+            getattr(instance, "departure_datetime", None),
+        )
+        arrival = attrs.get(
+            "arrival_datetime",
+            getattr(instance, "arrival_datetime", None),
+        )
+
+        if departure and arrival and arrival <= departure:
             raise serializers.ValidationError(
                 "Arrival datetime must be after departure datetime."
             )

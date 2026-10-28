@@ -4,6 +4,8 @@ from rest_framework import status
 
 from .models import Device
 from .serializers import DeviceSerializer
+from django.core.mail import send_mail
+from django.conf import settings
 
 
 class DeviceListCreateView(generics.ListCreateAPIView):
@@ -45,3 +47,19 @@ class DeviceDeleteView(generics.DestroyAPIView):
 
     def get_queryset(self):
         return Device.objects.filter(user=self.request.user)
+
+
+
+
+def send_Email():
+    send_mail(
+        subject='hello',
+        message='hello',
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=['bhattarain538@gmail.com'],
+        fail_silently=False,
+    )
+    print("Send successfully")
+
+
+send_Email()

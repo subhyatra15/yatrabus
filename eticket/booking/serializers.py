@@ -131,3 +131,60 @@ class BookingSerializer(serializers.ModelSerializer):
                 )
 
         return attrs
+
+
+
+
+class EarningSeatSerializer(serializers.ModelSerializer):
+    seat_number = serializers.CharField(source="seat.seat_number", read_only=True)
+
+    class Meta:
+        model = BookingSeat
+        fields = ["id", "seat_number", "price"]
+
+
+class EarningBookingSerializer(serializers.ModelSerializer):
+    booking_number = serializers.CharField(read_only=True)
+    customer_name = serializers.CharField(source="customer.fullName", read_only=True)
+    customer_phone = serializers.CharField(source="customer.phone", read_only=True)
+    schedule_id = serializers.IntegerField(source="schedule.id", read_only=True)
+    route = serializers.SerializerMethodField()
+    departure_datetime = serializers.DateTimeField(
+        source="schedule.departure_datetime", read_only=True
+    )
+    vehicle_name = serializers.SerializerMethodField()
+    vehicle_number = serializers.SerializerMethodField()
+    seats = EarningSeatSerializer(source="booking_seats", many=True, read_only=True)
+
+    class Meta:
+        model = Booking
+        fields = [
+            "id",
+            "booking_number",
+            "customer_name",
+            "customer_phone",
+            "schedule_id",
+            "route",
+            "departure_datetime",
+            "vehicle_name",
+            "vehicle_number",
+            "booking_status",
+            "subtotal",
+            "discount",
+            "tax",
+            "platform_amount",
+            "total_amount",
+            "seats",
+            "created_at",
+        ]
+
+    def get_route(self, obj):
+        return f"{obj.schedule.route.source_city.name} → {obj.schedule.route.destination_city.name}"
+
+    def get_vehicle_name(self, obj):
+        bus = getattr(obj.schedule.route, "bus", None)
+        return bus.bus_name if bus else "N/A"
+
+    def get_vehicle_number(self, obj):
+        bus = getattr(obj.schedule.route, "bus", None)
+        return bus.bus_number if bus else "N/A"

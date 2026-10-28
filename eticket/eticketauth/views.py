@@ -1,13 +1,14 @@
 from rest_framework import permissions, viewsets,status,generics ,views
 from rest_framework.permissions import AllowAny
 from django.contrib.auth import get_user_model
-from .serializers import UserSerializer,PhoneTokenObtainPairSerializer
+from .serializers import UserSerializer,PhoneTokenObtainPairSerializer,GoogleAuthSerializer
 # eticketauth/views.py
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
 from .serializers import RegisterSerializer
 from rest_framework.decorators import action
+
 
 
 User = get_user_model()
@@ -141,3 +142,41 @@ class AuthMeView(views.APIView):
                 "emergency_name": user.emergency_name,
             }
         })
+
+
+
+
+class GoogleAuthView(views.APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = GoogleAuthSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user, picture = serializer.save()
+
+        refresh = RefreshToken.for_user(user)
+
+        image_url = picture 
+        if user.image and user.image.name:
+            try:
+                image_url = user.image.url
+            except (ValueError, AttributeError):
+                pass
+
+        return Response({
+            "success": True,
+            "refresh": str(refresh),
+            "access": str(refresh.access_token),
+            "user": {
+                "id": user.id,
+                "fullName": user.fullName,
+                "phone": user.phone,
+                "email": user.email,
+                "role": user.role,
+                "image": image_url,
+                "address": user.address,
+                "emergency_contact": user.emergency_contact,
+                "emergency_name": user.emergency_name,
+                "has_phone": not user.phone.startswith("g_"),
+            }
+        }, status=status.HTTP_200_OK)

@@ -35,6 +35,7 @@ eticket/settings.py
 
 
 firebase
+./firebase
 
 firebase/service-account.json
 

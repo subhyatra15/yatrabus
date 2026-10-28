@@ -1,4 +1,5 @@
 from django.utils.dateparse import parse_date
+from datetime import datetime, time as dtime
 
 from rest_framework import viewsets, permissions,views,status
 from rest_framework.permissions import IsAuthenticated
@@ -16,11 +17,13 @@ from django.utils import timezone
 from datetime import timedelta
 from hiace.serializers import CreateHiaceScheduleSerializer
 from hiace.models import Hiace, HiaceRoute, HiaceSchedule
+from booking.models import Booking
 
 
 class ScheduleViewSet(viewsets.ModelViewSet):
     serializer_class = ScheduleSerializer
     now = timezone.now()
+
     def get_permissions(self):
         if self.action in ["list", "retrieve"]:
             return [permissions.AllowAny()]
@@ -29,7 +32,16 @@ class ScheduleViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         expire_bookings()
-        queryset = Schedule.objects.filter(arrival_datetime__gt=self.now).select_related(
+        now = timezone.now()
+
+        # Only today-and-future departures (old schedules no longer on top)
+        today_start = timezone.make_aware(
+            datetime.combine(timezone.localdate(), dtime.min)
+        )
+
+        queryset = Schedule.objects.filter(
+            departure_datetime__gte=today_start
+        ).select_related(
             "route",
             "route__bus",
             "route__operator",
@@ -74,7 +86,6 @@ class ScheduleViewSet(viewsets.ModelViewSet):
                 )
 
         return queryset.order_by("departure_datetime")
-    
 
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset()
@@ -83,14 +94,35 @@ class ScheduleViewSet(viewsets.ModelViewSet):
         destination = request.query_params.get("destination")
         bus = request.query_params.get("bus")
         if bus:
-            queryset = queryset.filter(route__bus = bus)
+            queryset = queryset.filter(route__bus=bus)
+
+        try:
+            skip = int(request.query_params.get("skip", 0))
+            if skip < 0:
+                skip = 0
+        except (ValueError, TypeError):
+            skip = 0
+
+        try:
+            limit = int(request.query_params.get("limit", 10))
+            if limit < 1:
+                limit = 10
+        except (ValueError, TypeError):
+            limit = 10
+
+        MAX_LIMIT = 100
+        if limit > MAX_LIMIT:
+            limit = MAX_LIMIT
+
+        total_count = queryset.count()
+        page_queryset = queryset[skip: skip + limit]
 
         fare_map = {}
         boarding_stop_map = {}
         dropping_stop_map = {}
 
         if source and destination:
-            for schedule in queryset:
+            for schedule in page_queryset:
                 try:
                     boarding_stop = RouteStop.objects.get(
                         route=schedule.route,
@@ -101,7 +133,7 @@ class ScheduleViewSet(viewsets.ModelViewSet):
                         route=schedule.route,
                         city__name__iexact=destination
                     )
-                    
+
                     if boarding_stop.stop_order >= dropping_stop.stop_order:
                         fare_map[schedule.id] = None
                         continue
@@ -120,7 +152,7 @@ class ScheduleViewSet(viewsets.ModelViewSet):
                     fare_map[schedule.id] = None
 
         serializer = self.get_serializer(
-            queryset,
+            page_queryset,
             many=True,
             context={
                 "fare_map": fare_map,
@@ -129,8 +161,12 @@ class ScheduleViewSet(viewsets.ModelViewSet):
             }
         )
 
-        return Response(serializer.data)
-
+        return Response({
+            "count": total_count,
+            "skip": skip,
+            "limit": limit,
+            "results": serializer.data,
+        })
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -148,6 +184,58 @@ class ScheduleViewSet(viewsets.ModelViewSet):
             )
 
         serializer.save()
+
+    # ------------------------------------------------------------------
+    # Update: drivers can only change status when no booking exists
+    # ------------------------------------------------------------------
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        user = request.user
+
+        # Admin: full update allowed
+        if user.role == "A":
+            return super().update(request, *args, **kwargs)
+
+        # Driver: restricted updates
+        if user.role == "D":
+            if instance.route.operator != user:
+                raise PermissionDenied(
+                    "You do not have permission to update this schedule."
+                )
+
+            allowed_fields = {"status"}
+            incoming_fields = set(request.data.keys())
+
+            if not incoming_fields.issubset(allowed_fields):
+                raise PermissionDenied(
+                    "Drivers can only update the status field."
+                )
+
+            new_status = request.data.get("status")
+            if new_status not in ("INACTIVE", "CANCELLED"):
+                raise PermissionDenied(
+                    "Drivers can only set status to INACTIVE or CANCELLED."
+                )
+
+            # Check if any bookings exist for this schedule
+            has_bookings = Booking.objects.filter(
+                schedule=instance,
+                booking_status__in=["PAID", "CONFIRMED", "PENDING"],
+            ).exists()
+
+            if has_bookings:
+                raise PermissionDenied(
+                    "Cannot change status. This schedule has bookings."
+                )
+
+            # ✅ pass partial correctly (no duplicate)
+            kwargs["partial"] = True
+            return super().update(request, *args, **kwargs)
+
+        raise PermissionDenied(
+            "You do not have permission to update this schedule."
+        )
 
     def perform_update(self, serializer):
         user = self.request.user
@@ -175,7 +263,6 @@ class ScheduleViewSet(viewsets.ModelViewSet):
             )
 
         instance.delete()
-
 
 
 

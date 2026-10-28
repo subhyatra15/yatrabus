@@ -11,7 +11,8 @@ from .views import (
     SelectSeatView,
     ReleaseSeatView,
     SelectedSeatsView,
-    RecommendedHiaceView
+    RecommendedHiaceView,
+    HiaceEarningsView
 )
 
 router = DefaultRouter()
@@ -21,6 +22,11 @@ router.register(r'hiace-schedules', HiaceScheduleViewSet, basename='hiace-schedu
 router.register(r'hiace-routes', HiaceRouteViewSet, basename='hiace-route')
 
 urlpatterns = [
+    path(
+        "driver/hiace-earnings/",
+        HiaceEarningsView.as_view(),
+        name="driver-hiace-earnings",
+    ),
     path("hiace/recommended/", RecommendedHiaceView.as_view(), name="recommended-hiace"),
     path(
     'hiace-seats/',

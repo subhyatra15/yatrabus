@@ -314,3 +314,68 @@ class CreateHiaceScheduleSerializer(serializers.Serializer):
                 "Arrival datetime must be after departure datetime."
             )
         return attrs
+
+
+
+
+
+class EarningHiaceSeatSerializer(serializers.ModelSerializer):
+    seat_number = serializers.CharField(source="seat.seat_number", read_only=True)
+
+    class Meta:
+        model = HiaceBookingSeat
+        fields = ["id", "seat_number", "price"]
+
+
+class EarningHiaceBookingSerializer(serializers.ModelSerializer):
+    booking_number = serializers.CharField(read_only=True)
+    customer_name = serializers.CharField(source="customer.fullName", read_only=True)
+    customer_phone = serializers.CharField(source="customer.phone", read_only=True)
+    schedule_id = serializers.IntegerField(source="schedule.id", read_only=True)
+    route = serializers.SerializerMethodField()
+    departure_datetime = serializers.DateTimeField(
+        source="schedule.departure_datetime", read_only=True
+    )
+    vehicle_name = serializers.SerializerMethodField()
+    vehicle_number = serializers.SerializerMethodField()
+    vehicle_type = serializers.SerializerMethodField()
+    seats = EarningHiaceSeatSerializer(
+        source="hiace_booking_seats", many=True, read_only=True
+    )
+
+    class Meta:
+        model = HiaceBooking
+        fields = [
+            "id",
+            "booking_number",
+            "customer_name",
+            "customer_phone",
+            "schedule_id",
+            "route",
+            "departure_datetime",
+            "vehicle_name",
+            "vehicle_number",
+            "vehicle_type",
+            "booking_status",
+            "subtotal",
+            "discount",
+            "tax",
+            "platform_amount",
+            "total_amount",
+            "seats",
+            "created_at",
+        ]
+
+    def get_route(self, obj):
+        return f"{obj.schedule.route.source_city.name} → {obj.schedule.route.destination_city.name}"
+
+    def get_vehicle_name(self, obj):
+        h = getattr(obj.schedule.route, "hiace", None)
+        return h.hiace_name if h else "N/A"
+
+    def get_vehicle_number(self, obj):
+        h = getattr(obj.schedule.route, "hiace", None)
+        return h.hiace_number if h else "N/A"
+
+    def get_vehicle_type(self, obj):
+        return "hiace"

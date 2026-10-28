@@ -3,9 +3,15 @@ import uuid
 
 from django.db import transaction
 from django.db.models import Count,Q,Prefetch
-from rest_framework import status, viewsets, filters, views
+from rest_framework import status, viewsets, filters, views,permissions
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied
+from datetime import datetime, time as dtime
+from django.utils import timezone
+from .serializers import EarningHiaceBookingSerializer
+from django.db.models import Sum, Count
+from django.utils import timezone
+from django.utils.dateparse import parse_date
 
 from rest_framework.response import Response
 from rest_framework.decorators import action
@@ -15,6 +21,7 @@ from rest_framework.exceptions import ValidationError
 import traceback
 from datetime import timedelta
 from django.db.models.deletion import ProtectedError
+from rest_framework.permissions import IsAuthenticated,AllowAny
 
 import json
 import redis
@@ -118,48 +125,60 @@ class HiaceViewSet(viewsets.ModelViewSet):
         }, status=status.HTTP_400_BAD_REQUEST)
 
 
-class HiaceScheduleViewSet(viewsets.ReadOnlyModelViewSet):
+class HiaceScheduleViewSet(viewsets.ModelViewSet):
     serializer_class = HiaceScheduleSerializer
-    permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status']
     search_fields = ['route__source_city__name', 'route__destination_city__name']
     ordering_fields = ['departure_datetime', 'arrival_datetime']
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve']:
+            return [AllowAny()]
+        return [IsAuthenticated()]
 
     def get_queryset(self):
         user = self.request.user
         hiace_id = self.request.query_params.get('hiace')
-        queryset = HiaceSchedule.objects.filter(status='ACTIVE')
-        
-        if user.role == 'D':
-            queryset = queryset.filter(route__operator = user)
+
+        # ✅ Only today-and-future departures (old schedules no longer on top)
+        today_start = timezone.make_aware(
+            datetime.combine(timezone.localdate(), dtime.min)
+        )
+
+        queryset = HiaceSchedule.objects.filter(
+            departure_datetime__gte=today_start
+        )
+
+        if not user.is_authenticated:
+            queryset = queryset.filter(status='ACTIVE')
+        elif user.role == 'A':
+            pass
+        elif user.role == 'D':
+            queryset = queryset.filter(route__operator=user)
+        else:
+            queryset = queryset.filter(status='ACTIVE')
 
         if hiace_id:
-            queryset = queryset.filter(route__hiace = hiace_id)
+            queryset = queryset.filter(route__hiace=hiace_id)
 
-        # Filter by source city
         source = self.request.query_params.get('source')
         if source:
             queryset = queryset.filter(
                 Q(route__source_city__name__icontains=source)
             )
 
-        
-        
-        # Filter by destination city
         destination = self.request.query_params.get('destination')
         if destination:
             queryset = queryset.filter(
                 Q(route__destination_city__name__icontains=destination)
             )
-        
-        # Filter by date
+
         date = self.request.query_params.get('date')
         if date:
-            queryset = queryset.filter(
-                departure_datetime__date=date
-            )
-        
+            queryset = queryset.filter(departure_datetime__date=date)
+
         return queryset.select_related(
             'route',
             'route__source_city',
@@ -171,6 +190,92 @@ class HiaceScheduleViewSet(viewsets.ReadOnlyModelViewSet):
             'route__fares',
         ).order_by('departure_datetime')
 
+    def _get_pagination(self):
+        try:
+            skip = int(self.request.query_params.get('skip', 0))
+            if skip < 0:
+                skip = 0
+        except (ValueError, TypeError):
+            skip = 0
+
+        try:
+            limit = int(self.request.query_params.get('limit', 10))
+            if limit < 1:
+                limit = 10
+        except (ValueError, TypeError):
+            limit = 10
+
+        MAX_LIMIT = 100
+        if limit > MAX_LIMIT:
+            limit = MAX_LIMIT
+
+        return skip, limit
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        skip, limit = self._get_pagination()
+        total_count = queryset.count()
+        page_queryset = queryset[skip: skip + limit]
+        serializer = self.get_serializer(page_queryset, many=True)
+        return Response({
+            'count': total_count,
+            'skip': skip,
+            'limit': limit,
+            'results': serializer.data,
+        })
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        user = request.user
+
+        if user.role == 'A':
+            return super().update(request, *args, **kwargs)
+
+        if user.role == 'D':
+            if instance.route.operator != user:
+                raise PermissionDenied(
+                    'You do not have permission to update this schedule.'
+                )
+
+            allowed_fields = {'status'}
+            if not set(request.data.keys()).issubset(allowed_fields):
+                raise PermissionDenied(
+                    'Drivers can only update the status field.'
+                )
+
+            new_status = request.data.get('status')
+            if new_status not in ('INACTIVE', 'CANCELLED'):
+                raise PermissionDenied(
+                    'Drivers can only set status to INACTIVE or CANCELLED.'
+                )
+
+            has_bookings = HiaceBooking.objects.filter(
+                schedule=instance,
+                booking_status__in=['PAID', 'CONFIRMED', 'PENDING'],
+            ).exists()
+
+            if has_bookings:
+                raise PermissionDenied(
+                    'Cannot change status. This schedule has bookings.'
+                )
+
+            return super().update(request, *args, **kwargs)
+
+        raise PermissionDenied(
+            'You do not have permission to update this schedule.'
+        )
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        schedule = self.get_object()
+
+        if user.role != 'A' and schedule.route.operator != user:
+            raise PermissionDenied(
+                'You do not have permission to update this schedule.'
+            )
+
+        serializer.save()
+
     @action(detail=False, methods=['get'], url_path='withroutestop')
     def with_route_stop(self, request):
         schedule_id = request.query_params.get('schedule_id')
@@ -179,23 +284,20 @@ class HiaceScheduleViewSet(viewsets.ReadOnlyModelViewSet):
                 {'error': 'schedule_id parameter is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         try:
-            # Get the schedule
             schedule = HiaceSchedule.objects.get(id=schedule_id)
-            
-            # Get route stops
+
             route_id = request.query_params.get('routeid')
             boarding_city = request.query_params.get('boardingcity')
             dropping_city = request.query_params.get('droppingcity')
-            
+
             if not route_id:
                 return Response(
                     {'error': 'routeid parameter is required'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
-            # Get route
+
             try:
                 route = HiaceRoute.objects.get(id=route_id)
             except HiaceRoute.DoesNotExist:
@@ -203,21 +305,22 @@ class HiaceScheduleViewSet(viewsets.ReadOnlyModelViewSet):
                     {'error': 'Route not found'},
                     status=status.HTTP_404_NOT_FOUND
                 )
-            
-            # Get stops
+
             stops = HiaceRouteStop.objects.filter(route=route).order_by('stop_order')
-            
-            # Get boarding and dropping stops
+
             boarding_stop = None
             dropping_stop = None
-            
+
             if boarding_city:
-                boarding_stop = stops.filter(city__name__icontains=boarding_city, is_boarding=True).first()
-            
+                boarding_stop = stops.filter(
+                    city__name__icontains=boarding_city, is_boarding=True
+                ).first()
+
             if dropping_city:
-                dropping_stop = stops.filter(city__name__icontains=dropping_city, is_dropping=True).first()
-            
-            # Get fare between boarding and dropping stops
+                dropping_stop = stops.filter(
+                    city__name__icontains=dropping_city, is_dropping=True
+                ).first()
+
             fare = None
             if boarding_stop and dropping_stop:
                 fare_obj = HiaceRouteFare.objects.filter(
@@ -227,17 +330,14 @@ class HiaceScheduleViewSet(viewsets.ReadOnlyModelViewSet):
                 ).first()
                 if fare_obj:
                     fare = fare_obj.fare
-            
-            # Get booked seats for this schedule
+
             booked_seats = HiaceBookingSeat.objects.filter(
                 booking__schedule=schedule,
                 booking__booking_status__in=['PENDING', 'PAID']
             ).values_list('seat_id', flat=True)
-            
-     
+
             all_seats = HiaceSeat.objects.filter(hiace=route.hiace)
-            
-            # Format seat data
+
             seat_data = []
             for seat in all_seats:
                 seat_data.append({
@@ -250,8 +350,7 @@ class HiaceScheduleViewSet(viewsets.ReadOnlyModelViewSet):
                     'col': seat.col,
                     'is_window': seat.is_window,
                 })
-            
-            # Build response data
+
             data = {
                 'id': schedule.id,
                 'route': schedule.route.id,
@@ -289,16 +388,16 @@ class HiaceScheduleViewSet(viewsets.ReadOnlyModelViewSet):
                 ],
                 'seats': seat_data,
             }
-            
+
             return Response({'data': data})
-            
+
         except HiaceSchedule.DoesNotExist:
             return Response(
                 {'error': 'Schedule not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
 
-
+        
 class HiaceBookingViewSet(viewsets.ModelViewSet):
     serializer_class = HiaceBookingSerializer
     permission_classes = [IsAuthenticated]
@@ -1361,3 +1460,136 @@ class RecommendedHiaceView(views.APIView):
             "count": len(serializer.data),
             "results": serializer.data
         })
+
+
+
+class HiaceEarningsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+
+        if user.role != "D":
+            return Response(
+                {"error": "Access denied. Only drivers can access this endpoint."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # -------- Date range --------
+        from_param = request.query_params.get("from_date")
+        to_param = request.query_params.get("to_date")
+
+        today = timezone.localdate()
+        from_date = parse_date(from_param) if from_param else today.replace(day=1)
+        to_date = parse_date(to_param) if to_param else today
+
+        if not from_date or not to_date:
+            return Response(
+                {"error": "Invalid date format. Use YYYY-MM-DD."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if from_date > to_date:
+            return Response(
+                {"error": "from_date must be before or equal to to_date."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from_dt = timezone.make_aware(datetime.combine(from_date, dtime.min))
+        to_dt = timezone.make_aware(datetime.combine(to_date, dtime.max))
+
+        # -------- Base queryset: PAID hiace bookings owned by this driver --------
+        hiace_qs = (
+            HiaceBooking.objects.filter(
+                schedule__route__operator=user,   # own hiace only
+                booking_status="PAID",
+                created_at__gte=from_dt,
+                created_at__lte=to_dt,
+            )
+            .select_related(
+                "customer",
+                "schedule",
+                "schedule__route",
+                "schedule__route__hiace",
+                "schedule__route__source_city",
+                "schedule__route__destination_city",
+            )
+            .prefetch_related(
+                "hiace_booking_seats",
+                "hiace_booking_seats__seat",
+            )
+            .order_by("-created_at")
+        )
+
+        # Optional status override
+        status_param = request.query_params.get("status")
+        if status_param:
+            hiace_qs = hiace_qs.filter(booking_status=status_param)
+
+        # Optional specific hiace filter
+        hiace_param = request.query_params.get("hiace")
+        if hiace_param:
+            try:
+                hiace_id = int(hiace_param)
+            except (ValueError, TypeError):
+                return Response(
+                    {"error": "hiace must be an integer"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            hiace_qs = hiace_qs.filter(schedule__route__hiace_id=hiace_id)
+
+        # -------- Summary --------
+        aggregate = hiace_qs.aggregate(
+            gross=Sum("total_amount"),
+            platform=Sum("platform_amount"),
+            subtotal=Sum("subtotal"),
+            discount=Sum("discount"),
+            tax=Sum("tax"),
+            bookings_count=Count("id"),
+        )
+
+        gross = aggregate["gross"] or Decimal("0")
+        platform = aggregate["platform"] or Decimal("0")
+        driver_earning = gross - platform
+
+        seat_count = HiaceBookingSeat.objects.filter(
+            booking__in=hiace_qs
+        ).count()
+
+        # -------- Pagination --------
+        try:
+            skip = max(0, int(request.query_params.get("skip", 0)))
+        except (ValueError, TypeError):
+            skip = 0
+        try:
+            limit = int(request.query_params.get("limit", 10))
+            if limit < 1:
+                limit = 10
+        except (ValueError, TypeError):
+            limit = 10
+        limit = min(limit, 100)
+
+        total_count = hiace_qs.count()
+        page_queryset = hiace_qs[skip: skip + limit]
+
+        serializer = EarningHiaceBookingSerializer(page_queryset, many=True)
+
+        return Response(
+            {
+                "from_date": from_date.isoformat(),
+                "to_date": to_date.isoformat(),
+                "summary": {
+                    "total_bookings": aggregate["bookings_count"] or 0,
+                    "total_seats": seat_count,
+                    "gross_amount": str(gross),
+                    "platform_cost": str(platform),
+                    "discount_total": str(aggregate["discount"] or Decimal("0")),
+                    "tax_total": str(aggregate["tax"] or Decimal("0")),
+                    "driver_earning": str(driver_earning),
+                },
+                "count": total_count,
+                "skip": skip,
+                "limit": limit,
+                "results": serializer.data,
+            },
+            status=status.HTTP_200_OK,
+        )

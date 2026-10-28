@@ -14,6 +14,7 @@ from routes.models import RouteStop, RouteFare
 from django.db.models import Prefetch
 from appsettings.models import Settings
 from seat.models import Seat
+from datetime import datetime, time as dtime
 
 import json
 import redis
@@ -22,6 +23,12 @@ from django.conf import settings
 from rest_framework.views import APIView
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
+
+from django.db.models import Sum, Count
+from django.utils import timezone
+from django.utils.dateparse import parse_date
+
+from .serializers import EarningBookingSerializer
 
 
 class BookingViewSet(viewsets.ModelViewSet):
@@ -464,3 +471,129 @@ class SelectedSeatsView(APIView):
             })
 
         return Response(selected)
+
+
+
+
+
+class DriverEarningsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+
+        if user.role != "D":
+            return Response(
+                {"error": "Access denied. Only drivers can access this endpoint."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # -------- Date range --------
+        from_param = request.query_params.get("from_date")
+        to_param = request.query_params.get("to_date")
+
+        today = timezone.localdate()
+        default_from = today.replace(day=1)  # start of month
+
+        from_date = parse_date(from_param) if from_param else default_from
+        to_date = parse_date(to_param) if to_param else today
+
+        if not from_date or not to_date:
+            return Response(
+                {"error": "Invalid date format. Use YYYY-MM-DD."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if from_date > to_date:
+            return Response(
+                {"error": "from_date must be before or equal to to_date."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from_dt = timezone.make_aware(
+            datetime.combine(from_date, dtime.min)
+        )
+        to_dt = timezone.make_aware(
+            datetime.combine(to_date, dtime.max)
+        )
+
+        # -------- Base queryset: only PAID bookings owned by this driver --------
+        bookings_qs = Booking.objects.filter(
+            schedule__route__operator=user,
+            booking_status="PAID",
+            created_at__gte=from_dt,
+            created_at__lte=to_dt,
+        ).select_related(
+            "customer",
+            "schedule",
+            "schedule__route",
+            "schedule__route__bus",
+            "schedule__route__source_city",
+            "schedule__route__destination_city",
+        ).prefetch_related(
+            "booking_seats",
+            "booking_seats__seat",
+        ).order_by("-created_at")
+
+        # Optional status override
+        status_param = request.query_params.get("status")
+        if status_param:
+            bookings_qs = bookings_qs.filter(booking_status=status_param)
+
+        # -------- Summary aggregates --------
+        aggregate = bookings_qs.aggregate(
+            gross=Sum("total_amount"),
+            platform=Sum("platform_amount"),
+            subtotal=Sum("subtotal"),
+            discount=Sum("discount"),
+            tax=Sum("tax"),
+            bookings_count=Count("id"),
+        )
+
+        gross = aggregate["gross"] or Decimal("0")
+        platform = aggregate["platform"] or Decimal("0")
+        driver_earning = gross - platform  # what the driver keeps
+
+        # Seat count (via BookingSeat join, filtered to this queryset)
+        seat_count = BookingSeat.objects.filter(
+            booking__in=bookings_qs
+        ).count()
+
+        # -------- Pagination --------
+        try:
+            skip = max(0, int(request.query_params.get("skip", 0)))
+        except (ValueError, TypeError):
+            skip = 0
+        try:
+            limit = int(request.query_params.get("limit", 10))
+            if limit < 1:
+                limit = 10
+        except (ValueError, TypeError):
+            limit = 10
+        limit = min(limit, 100)
+
+        total_count = bookings_qs.count()
+        page_queryset = bookings_qs[skip: skip + limit]
+
+        serializer = EarningBookingSerializer(page_queryset, many=True)
+
+        return Response(
+            {
+                "from_date": from_date.isoformat(),
+                "to_date": to_date.isoformat(),
+                "summary": {
+                    "total_bookings": aggregate["bookings_count"] or 0,
+                    "total_seats": seat_count,
+                    "gross_amount": str(gross),
+                    "platform_cost": str(platform),
+                    "discount_total": str(aggregate["discount"] or Decimal("0")),
+                    "tax_total": str(aggregate["tax"] or Decimal("0")),
+                    "driver_earning": str(driver_earning),
+                },
+                "count": total_count,
+                "skip": skip,
+                "limit": limit,
+                "results": serializer.data,
+            },
+            status=status.HTTP_200_OK,
+        )

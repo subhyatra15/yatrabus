@@ -6,6 +6,7 @@ from .views import (
     SelectSeatView,
     ReleaseSeatView,
     SelectedSeatsView,
+    DriverEarningsView
 )
 
 
@@ -19,7 +20,7 @@ router.register(
 
 
 urlpatterns = [
-
+    path("driver/earnings/", DriverEarningsView.as_view(), name="driver-earnings"),
     # Select a seat
     path(
         "trips/<int:trip_id>/seats/<str:seat_id>/select/",

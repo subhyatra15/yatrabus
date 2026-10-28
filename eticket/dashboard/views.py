@@ -424,7 +424,27 @@ class DriverTripsView(views.APIView):
             if not trips:
                 return Response(self.get_demo_trips(user), status=status.HTTP_200_OK)
 
-            return Response(trips, status=status.HTTP_200_OK)
+            # Apply pagination
+            try:
+                skip = int(request.query_params.get('skip', 0))
+                limit = int(request.query_params.get('limit', 10))
+                if skip < 0:
+                    skip = 0
+                if limit < 1:
+                    limit = 10
+            except (ValueError, TypeError):
+                skip = 0
+                limit = 10
+
+            total_count = len(trips)
+            paginated_trips = trips[skip:skip + limit]
+
+            return Response({
+                'count': total_count,
+                'skip': skip,
+                'limit': limit,
+                'results': paginated_trips,
+            }, status=status.HTTP_200_OK)
 
         except Exception as e:
             print(f"Error fetching trips: {e}")
@@ -434,7 +454,7 @@ class DriverTripsView(views.APIView):
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
+    
     def get_trip_status(self, schedule):
         """
         Determine the status of a trip

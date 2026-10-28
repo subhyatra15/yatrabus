@@ -33,6 +33,7 @@ class User(AbstractUser):
                 null=True,
                 blank=True
             )
+    google_id = models.CharField(max_length=255, unique=True, null=True, blank=True)
 
   
     USERNAME_FIELD = "phone"
